@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0.0",
+  "interface_version": "2.0",
+  "competition_id": "agenthon2026-analysis-dev",
+  "team_id": "REPLACE_WITH_TOOLKIT_DERIVED_TEAM_ID",
+  "track": "analysis",
+  "phase": "dev",
+  "category": "api",
+  "image": {
+    "registry": "docker.io",
+    "repository": "REPLACE_WITH_PUBLIC_IMAGE_REPOSITORY",
+    "digest": "sha256:REPLACE_WITH_IMMUTABLE_IMAGE_DIGEST"
+  },
+  "image_access": "public",
+  "models": [
+    {
+      "name": "nvidia/nemotron-3-super-120b-a12b",
+      "version": "rl-030326-fp8",
+      "training_cutoff": "unpublished",
+      "access": "api",
+      "revision": "rl-030326-fp8"
+    }
+  ],
+  "license": "MIT",
+  "descriptor_digest": "sha256:REGENERATED_BY_TOOLKIT"
+}

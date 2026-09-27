@@ -1,0 +1,77 @@
+name: Publish Agenthon image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out participant agent
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build linux/amd64 image locally
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/${{ github.repository_owner }}/optivex-t4-agent:dev
+          provenance: false
+          sbom: false
+
+      - name: Check out pinned public Track 4 fixtures
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Agenthon-2026/track4-analysis-public
+          ref: 2b307560c8183905a030dcb4cd26ce857a039cfd
+          path: .upstream
+
+      - name: Verify image contract and run mock smoke test
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/optivex-t4-agent:dev
+        run: |
+          test "$(docker image inspect "$IMAGE" --format '{{.Architecture}}')" = amd64
+          test "$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "qfbench2.interface_version" }}')" = 2.0
+          docker run --rm "$IMAGE" analyze --help
+          mkdir -p smoke-output
+          docker run --rm \
+            -v "$PWD/.upstream/units/t4-EXAMPLE-eps-beat:/input:ro" \
+            -v "$PWD/smoke-output:/output" \
+            "$IMAGE" analyze --mock \
+            --task /input/task.json \
+            --corpus /input/corpus \
+            --out /output/answer.json
+          python -m json.tool smoke-output/answer.json >/dev/null
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish and record immutable digest
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/optivex-t4-agent:dev
+        run: |
+          docker push "$IMAGE"
+          reference="$(docker image inspect "$IMAGE" --format '{{ index .RepoDigests 0 }}')"
+          digest="${reference##*@}"
+          test "${digest#sha256:}" != "$digest"
+          test "${#digest}" -eq 71
+          printf '%s\n' "$digest" | tee image-digest.txt
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-digest
+          path: image-digest.txt

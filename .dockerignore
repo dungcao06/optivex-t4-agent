@@ -1,0 +1,8 @@
+.git
+.github
+__pycache__
+*.pyc
+tests
+submission*.json
+submission*.zip
+team-claim.json
