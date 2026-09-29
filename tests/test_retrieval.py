@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+from itertools import islice
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,7 +13,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT.parent / "track4-analysis-public"))
+UPSTREAM = Path(os.environ.get("T4_UPSTREAM_PATH", ROOT.parent / "track4-analysis-public"))
+sys.path.insert(0, str(UPSTREAM))
 
 
 def retrieval_module():
@@ -199,3 +202,132 @@ def test_unfamiliar_vocabulary_still_provides_bounded_eligible_evidence(tmp_path
     index = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31")
     selected = index.retrieve({"target": {"name": "credit_risk"}}, {"entity_id": "UNKNOWN"}, top_k=1)
     assert [chunk.doc_id for chunk in selected] == ["new"]
+
+
+@pytest.mark.parametrize("markdown", [False, True])
+def test_compact_table_crossing_window_keeps_header_units_and_last_row(tmp_path, markdown):
+    """Catches a passage boundary separating a series header from its recent rows."""
+    mod = retrieval_module()
+    header = "date | ALPHA | BETA\n"
+    table = header + ("--- | ---: | ---:\n" if markdown else "")
+    table += "".join(f"2030-01-{day:02d} | 4.21 | 3.75\n" for day in range(1, 25))
+    caption = "Rates — units: percent:\n"
+    prefix = "Résumé and context. " * 85 + "\n\n"
+    text = prefix + caption + table + "\nFollowing commentary. " * 60
+    write_doc(tmp_path, "generic", text)
+    corpus = mod.build_index(tmp_path)
+    chunks = mod.EvidenceIndex(corpus, "2024-01-31").retrieve(
+        {"target": {"name": "yield_change"}}, {"entity_id": "ALPHA"},
+    )
+    assert any(caption + table in chunk.text for chunk in chunks)
+    for chunk in corpus.chunks:
+        assert chunk.text == text[chunk.span_start:chunk.span_end]
+        assert 0 < len(chunk.text) <= 2200
+        assert not len(prefix) < chunk.span_start < len(prefix + caption + table)
+        assert not len(prefix) < chunk.span_end < len(prefix + caption + table)
+    assert corpus.chunks[0].span_start == 0
+    assert corpus.chunks[-1].span_end == len(text)
+    assert all(b.span_start <= a.span_end for a, b in zip(corpus.chunks, corpus.chunks[1:]))
+
+
+def test_public_rates_retrieval_preserves_complete_table_for_every_maturity():
+    """Catches table-tail loss through actual ranked retrieval, not only indexing."""
+    mod = retrieval_module()
+    unit = UPSTREAM / "units/t4-fomc-curve-20240918"
+    task = json.loads((unit / "task.json").read_text(encoding="utf-8"))
+    corpus = mod.build_index(unit / "corpus")
+    text = corpus.doc_texts["RATES_SNAPSHOT_20240919"]
+    full_table = text[text.index("U.S. Treasury constant-maturity yields, percent, recent closes:"):]
+    assert "2024-09-19 | 3.93 | 3.59" in full_table
+    assert len(task["entities"]) == 6
+    index = mod.EvidenceIndex(corpus, task["cutoff_date"])
+    for entity in task["entities"]:
+        selected = index.retrieve(task, entity)
+        assert any(full_table in chunk.text for chunk in selected), entity["entity_id"]
+        assert sum(len(chunk.text) for chunk in selected) <= 16000
+        assert all(chunk.text == corpus.doc_texts[chunk.doc_id][chunk.span_start:chunk.span_end]
+                   and len(chunk.text) <= 2200 for chunk in selected)
+
+
+@pytest.mark.parametrize("prefix_length", [0, 100, 1500, 2000, 2199, 4000])
+def test_multiple_unicode_tables_have_no_internal_boundaries_or_coverage_gaps(prefix_length):
+    """Catches overlap starts inside tables and non-progress at adjacent boundaries."""
+    mod = retrieval_module()
+    table_a = "| Période | Valeur |\r\n| :--- | ---: |\r\n" + "| février | 4.2 |\r\n" * 40
+    table_b = "Date | RATE\n" + "2030-01-01 | 3.1\n" * 65
+    prefix = "x" * prefix_length + "\n\n"
+    bridge = "\nOrdinary interstitial discussion.\n\n"
+    text = prefix + table_a + bridge + table_b + "\n" + "z" * 2600
+    intervals = [(len(prefix), len(prefix + table_a)),
+                 (len(prefix + table_a + bridge), len(prefix + table_a + bridge + table_b))]
+    windows = list(islice(mod._passages(text), 100))
+    assert len(windows) < 100
+    assert windows[0][0] == 0 and windows[-1][1] == len(text)
+    for start, end in windows:
+        assert 0 < end - start <= 2200
+        for table_start, table_end in intervals:
+            assert not table_start < start < table_end
+            assert not table_start < end < table_end
+    assert all(a[0] < b[0] <= a[1] for a, b in zip(windows, windows[1:]))
+    assert all(any(start <= left and end >= right for start, end in windows)
+               for left, right in intervals)
+
+
+def test_exact_limit_table_is_whole_without_oversized_caption():
+    """Catches dropping a fitting table because its adjacent units exceed the cap."""
+    mod = retrieval_module()
+    table = "Name | Value\nALPHA | " + "1" * 2178 + "\n"
+    assert len(table) == 2200
+    text = "Context. " * 180 + "\nUnits: percent\n" + table + "Tail. " * 500
+    pieces = [text[start:end] for start, end in mod._passages(text)]
+    assert table in pieces
+    assert all(len(piece) <= 2200 for piece in pieces)
+
+
+@pytest.mark.parametrize("table", [
+    "date | RATE\n" + "2030-01-01 | 3.1\n" * 200,  # Oversized whole block.
+    "date | RATE\n2030-01-01 | 3.1 | extra\n" + "2030-01-02 | 3.2\n" * 50,
+    "date | RATE\n--- | ---\n--- | ---\n",  # No data.
+    "2029 | 2030\n1 | 2\n",  # No recognizable header.
+    "Name \\| escaped | Value\n" + "ALPHA | 3.1\n" * 65,
+])
+def test_oversized_or_unrecognized_table_retains_bounded_gap_free_windows(table):
+    """Catches malformed/oversized blocks expanding windows or stalling traversal."""
+    mod = retrieval_module()
+    text = "Context. " * 180 + "\n" + table + "\n" + "Later context. " * 300
+    windows = list(islice(mod._passages(text), 100))
+    assert len(windows) < 100
+    assert windows[0][0] == 0 and windows[-1][1] == len(text)
+    assert all(0 < end - start <= 2200 for start, end in windows)
+    assert all(a[0] < b[0] <= a[1] for a, b in zip(windows, windows[1:]))
+
+
+def test_many_small_tables_traverse_with_bounded_number_of_windows():
+    """Catches repeated one-character progress around dense protected blocks."""
+    mod = retrieval_module()
+    block = "Name | Value\nALPHA | 3.1\nBETA | 2.1\n\n"
+    text = block * 20000
+    windows = list(islice(mod._passages(text), 1000))
+    assert len(windows) < 1000
+    assert windows[-1][1] == len(text)
+    assert all(0 < end - start <= 2200 for start, end in windows)
+    assert all(a[0] < b[0] <= a[1] for a, b in zip(windows, windows[1:]))
+
+
+@pytest.mark.parametrize("table", [
+    "date | RATE\n2030-01-01 | 3.1 | extra\n" + "2030-01-02 | 3.2\n" * 50,
+    "2029 | 2030\n" + "1 | 2\n" * 130,
+    "Name \\| escaped | Value\n" + "ALPHA | 3.1\n" * 65,
+    "Name | Value\n--- | ---\n" + "--- | ---\n" * 80,
+])
+def test_malformed_pipe_runs_do_not_trigger_table_preservation(table):
+    """Catches false positives silently changing evidence for inconsistent pipe prose."""
+    mod = retrieval_module()
+    text = "Context. " * 180 + "\n" + table + "\n" + "Later context. " * 300
+    pieces = [text[start:end] for start, end in mod._passages(text)]
+    assert not any(table in piece for piece in pieces)
+
+
+def test_plain_text_keeps_existing_overlap_windows():
+    """Catches a table-only fix altering ordinary hard-window traversal."""
+    assert list(retrieval_module()._passages("x" * 5000)) == [(0, 2200), (2000, 4200), (4000, 5000)]

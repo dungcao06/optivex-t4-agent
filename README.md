@@ -9,10 +9,28 @@ Exact quotation matching establishes provenance, not semantic entailment. If inf
 This candidate adds an internal check for the requested quantity, units, denominator and
 forecast period, distinct from an evidence item's observation period and publication date.
 It asks the model to use compatible supplied quantities for changes, growth rates and ratios.
-The retrieval algorithm, model settings, runtime limits and output schema are unchanged.
+That prompt-only step left retrieval, model settings, runtime limits and the output schema unchanged.
 This is a narrow Logistics/Time-inspired prompt experiment, not a validated LTF trading
 strategy. Protocol tests can establish compatibility, not improved forecast quality; an
 official comparison is required before claiming a competitive gain.
+
+## Compact-table evidence experiment
+
+The next candidate keeps recognized compact pipe-delimited tables together when they fit
+the existing 2,200-character passage limit. Headers and dated values remain unchanged
+original-text slices with exact citation offsets. An immediately preceding line is
+included when it has at most 200 stripped characters, ends in `:` or contains the word
+`unit`/`units`, and fits the same passage limit. This addresses lost table-tail evidence and supports the
+quantity/period checks; it does not supply a numerical ledger or new model calls.
+
+Recognition requires consistent nonempty columns, a textual header and data rows, with
+an optional Markdown separator. Without a separator, each data row must contain a number.
+Oversized, escaped-pipe or unrecognized tables retain ordinary bounded windows; flattened
+filing tables are not reconstructed. Total evidence remains capped at 16,000 characters.
+Ranking weights, issuer/cutoff filtering, prompts, model settings and runtime limits stay
+unchanged, though different passage boundaries can change retrieval rankings. Generic
+boundary tests and all six entities in the public rates fixture verify complete table
+retrieval, not improved prediction quality or leaderboard score.
 
 ## Local run
 
