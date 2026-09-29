@@ -1,0 +1,285 @@
+"""Bounded, entity-aware retrieval over the supplied frozen corpus only.
+
+Passages are slices of the scorer's original document text, so their offsets
+remain valid even for multi-megabyte SEC filings and Unicode punctuation.
+"""
+from __future__ import annotations
+
+import heapq
+import json
+import math
+import re
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+from baselines.strong_rag_baseline.indexer import Chunk, IndexedCorpus
+
+_MAX_PASSAGE = 2200
+_MIN_BREAK = 1600
+_OVERLAP = 200
+_EVIDENCE_BUDGET = 16000
+_TOKEN = re.compile(r"[a-z0-9]+")
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+_STOP = frozenset(
+    "a an and are as at be been before by can do each for from given in into is it "
+    "its of on or per than that the their these they this through to using was were "
+    "will with within you your only frozen corpus evidence predict prediction "
+    "provide report support claim claims citations passage passages cutoff post "
+    "point forecast interval percent table below above absent design "
+    "sec edgar filings filing available most recent company companies quarter "
+    "reported released published after not use expressed relative given "
+    "first months ended month known following statement support reasoning".split()
+)
+
+
+@dataclass(frozen=True)
+class _IndexedEvidence(IndexedCorpus):
+    doc_metadata: dict[str, dict] = field(default_factory=dict)
+
+
+def _valid_date(value: object) -> date | None:
+    if not isinstance(value, str) or not _DATE.fullmatch(value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _passages(text: str):
+    """Yield overlapping original-text windows, preferring paragraph boundaries."""
+    start = 0
+    while start < len(text):
+        end = min(start + _MAX_PASSAGE, len(text))
+        if end < len(text):
+            lower = start + _MIN_BREAK
+            paragraph = text.rfind("\n", lower, end)
+            space = text.rfind(" ", lower, end)
+            boundary = paragraph if paragraph >= lower else space
+            if boundary >= lower:
+                end = boundary + 1
+        yield start, end
+        if end == len(text):
+            break
+        start = max(start + 1, end - _OVERLAP)
+
+
+def build_index(corpus_dir: str | Path) -> IndexedCorpus:
+    """Read corpus documents without fetching data or rewriting citation text."""
+    root = Path(corpus_dir)
+    chunks: list[Chunk] = []
+    doc_texts: dict[str, str] = {}
+    doc_dates: dict[str, str | None] = {}
+    metadata: dict[str, dict] = {}
+    for path in sorted(root.rglob("*.json")):
+        if path.name == "manifest.json" or path.is_symlink():
+            continue
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            continue
+        doc_id = doc.get("doc_id", path.stem)
+        if not isinstance(doc_id, str) or not doc_id:
+            continue
+        if doc_id in doc_texts:
+            raise ValueError(f"duplicate corpus document id: {doc_id}")
+        if isinstance(doc.get("text"), str):
+            text = doc["text"]
+        else:
+            text = " ".join(
+                span.get("text", "") for span in doc.get("spans", [])
+                if isinstance(span, dict) and isinstance(span.get("text", ""), str)
+            )
+        raw_date = doc.get("doc_date")
+        doc_date = raw_date if isinstance(raw_date, str) else None
+        doc_texts[doc_id] = text
+        doc_dates[doc_id] = doc_date
+        metadata[doc_id] = {
+            key: doc[key] for key in ("cik", "ticker", "title", "source", "series_id")
+            if key in doc
+        }
+        metadata[doc_id]["relative_path"] = path.relative_to(root).as_posix()
+        for start, end in _passages(text):
+            if text[start:end].strip():
+                chunks.append(Chunk(doc_id, doc_date, start, end, text[start:end]))
+    return _IndexedEvidence(chunks, doc_texts, doc_dates, metadata)
+
+
+def _tokens(value: object) -> list[str]:
+    return [word for word in _TOKEN.findall(str(value).lower())
+            if len(word) > 1 and word not in _STOP]
+
+
+def _cik(value: object) -> str | None:
+    text = str(value).strip()
+    return str(int(text)) if text.isdigit() else None
+
+
+class EvidenceIndex:
+    """BM25 retrieval with issuer affinity, source diversity and a hard size cap."""
+
+    def __init__(self, corpus: IndexedCorpus, cutoff_date: str) -> None:
+        cutoff = _valid_date(cutoff_date)
+        if cutoff is None:
+            raise ValueError("task cutoff_date is not an ISO calendar date")
+        self.corpus = corpus
+        self.metadata = getattr(corpus, "doc_metadata", {})
+        self.chunks = [
+            chunk for chunk in corpus.chunks
+            if (parsed := _valid_date(chunk.doc_date)) is not None and parsed <= cutoff
+        ]
+        self._lengths: list[int] = []
+        self._postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for index, chunk in enumerate(self.chunks):
+            counts = Counter(_tokens(chunk.text))
+            self._lengths.append(sum(counts.values()))
+            for token, count in counts.items():
+                self._postings[token].append((index, count))
+        self._avg_len = max(1.0, sum(self._lengths) / max(1, len(self.chunks)))
+
+    def _affinities(self, entity: dict) -> tuple[dict[str, float], set[str], set[str]]:
+        """Prefer a declared issuer/subtree; retain unowned shared macro sources."""
+        doc_ids = {chunk.doc_id for chunk in self.chunks}
+        wanted_cik = _cik(entity.get("cik", ""))
+        wanted_tickers = {str(entity.get(key, "")).casefold() for key in ("ticker", "entity_id")}
+        wanted_tickers.discard("")
+        matches: set[str] = set()
+        other_issuers: set[str] = set()
+        for doc_id in doc_ids:
+            meta = self.metadata.get(doc_id, {})
+            found_cik = _cik(meta.get("cik", ""))
+            if found_cik is None:
+                edgar = re.search(r"(?:^|_)EDGAR_(\d+)(?:_|$)", doc_id, re.I)
+                if edgar:
+                    found_cik = _cik(edgar.group(1))
+            ticker = str(meta.get("ticker", "")).casefold()
+            if wanted_cik and found_cik:
+                (matches if wanted_cik == found_cik else other_issuers).add(doc_id)
+            elif ticker:
+                (matches if ticker in wanted_tickers else other_issuers).add(doc_id)
+
+        # A shared corpus/ reference imposes no filter. More specific references
+        # are used only when they actually resolve to supplied corpus documents.
+        raw_refs = entity.get("corpus_ref", [])
+        refs = raw_refs if isinstance(raw_refs, list) else [raw_refs]
+        prefixes: list[str] = []
+        for raw in refs:
+            if not isinstance(raw, str):
+                continue
+            ref = raw.replace("\\", "/").removeprefix("./").removeprefix("corpus/").strip("/")
+            if ref and ref != "corpus" and ".." not in ref.split("/"):
+                prefixes.append(ref)
+        ref_matches: set[str] = set()
+        for doc_id in doc_ids:
+            relative = self.metadata.get(doc_id, {}).get("relative_path", "")
+            if any(relative == prefix or relative.startswith(prefix + "/") or doc_id == prefix
+                   for prefix in prefixes):
+                ref_matches.add(doc_id)
+        excluded = other_issuers if matches else set()
+        if ref_matches:
+            excluded = excluded | {
+                doc_id for doc_id in doc_ids - ref_matches
+                if "/" in self.metadata.get(doc_id, {}).get("relative_path", "")
+            }
+        affinities = {doc_id: 1.0 for doc_id in doc_ids}
+        for doc_id in matches | ref_matches:
+            affinities[doc_id] = 3.0
+        return affinities, excluded, matches
+
+    def retrieve(self, task: dict, entity: dict, top_k: int = 8) -> list[Chunk]:
+        if top_k <= 0 or not self.chunks:
+            return []
+        weights: dict[str, float] = {}
+        affinities, excluded, issuer_matches = self._affinities(entity)
+
+        def add(value: object, weight: float) -> None:
+            for token in set(_tokens(value)):
+                if not token.isdigit():
+                    weights[token] = weights.get(token, 0.0) + weight
+
+        add(task.get("prompt", ""), 1.0)
+        target = task.get("target", {})
+        add(target.get("name", "") if isinstance(target, dict) else "", 3.0)
+        for key, value in entity.items():
+            if key == "corpus_ref" or not isinstance(value, (str, int, float)):
+                continue
+            if issuer_matches and key in {
+                "name", "entity_id", "ticker", "cik", "sector", "industry", "currency",
+                "quarter_reported", "prior_year_quarter", "expected_report_date",
+            }:
+                # Attribution is already established by metadata. Repeating the
+                # issuer's name/CIK in BM25 instead promotes filing cover pages.
+                continue
+            add(key, 0.25)
+            add(value, 1.5 if key in {"name", "entity_id", "ticker", "cik", "series_id", "series_name", "series_fred", "description", "tenor"} else 0.5)
+
+        scores = [0.0] * len(self.chunks)
+        count = len(self.chunks)
+        for token, weight in weights.items():
+            postings = self._postings.get(token, [])
+            idf = math.log(1 + (count - len(postings) + 0.5) / (len(postings) + 0.5))
+            for index, frequency in postings:
+                norm = 1.5 * (0.25 + 0.75 * self._lengths[index] / self._avg_len)
+                scores[index] += weight * idf * frequency * 2.5 / (frequency + norm)
+        candidates = [
+            (scores[index] * affinities[chunk.doc_id], index)
+            for index, chunk in enumerate(self.chunks)
+            if chunk.doc_id not in excluded and scores[index] > 0
+        ]
+        if not candidates:
+            # Lexical mismatch is not missing evidence. Offer real eligible
+            # passages, preferring issuer affinity and then publication recency;
+            # downstream code must still assess whether they support a forecast.
+            candidates = [
+                ((affinities[chunk.doc_id] - 1) * 1_000_000
+                 + date.fromisoformat(chunk.doc_date).toordinal(), index)
+                for index, chunk in enumerate(self.chunks)
+                if chunk.doc_id not in excluded
+            ]
+        heap = [
+            (-score, self.chunks[index].doc_id, self.chunks[index].span_start,
+             index, 0, score)
+            for score, index in candidates
+            if len(self.chunks[index].text) <= _EVIDENCE_BUDGET
+        ]
+        heapq.heapify(heap)
+        selected: list[Chunk] = []
+        selected_tokens: list[set[str]] = []
+        doc_counts: Counter = Counter()
+        used = 0
+        while heap and len(selected) < top_k:
+            # Diminishing returns allow independent documents to compete without
+            # forcing a quota of irrelevant sources into each prompt. Priorities
+            # can only fall after accepting a passage from that document. Lazy
+            # heap updates avoid rescanning all length/duplicate rejects.
+            _, doc_id, start, index, seen_count, base_score = heapq.heappop(heap)
+            chunk = self.chunks[index]
+            if used + len(chunk.text) > _EVIDENCE_BUDGET:
+                continue
+            if seen_count != doc_counts[doc_id]:
+                current_count = doc_counts[doc_id]
+                score = base_score / (1 + 0.6 * current_count)
+                heapq.heappush(heap, (-score, doc_id, start, index, current_count, base_score))
+                continue
+            tokens = set(_tokens(chunk.text))
+            duplicate = False
+            for previous, previous_tokens in zip(selected, selected_tokens):
+                intersection = max(0, min(previous.span_end, chunk.span_end) - max(previous.span_start, chunk.span_start))
+                if previous.doc_id == chunk.doc_id and intersection > min(len(previous.text), len(chunk.text)) / 3:
+                    duplicate = True
+                    break
+                if chunk.text == previous.text:
+                    duplicate = True
+                    break
+                union = tokens | previous_tokens
+                if previous.doc_id == chunk.doc_id and union and len(tokens & previous_tokens) / len(union) > 0.90:
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+            selected.append(chunk)
+            selected_tokens.append(tokens)
+            doc_counts[chunk.doc_id] += 1
+            used += len(chunk.text)
+        return selected

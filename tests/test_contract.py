@@ -25,7 +25,17 @@ def test_submission_uses_current_house_category() -> None:
     assert "byo-large" not in descriptor
 
 
-def test_wrapper_omits_null_optional_label() -> None:
-    source = (ROOT / "analyze.py").read_text(encoding="utf-8")
-    assert 'result.prediction.get("label") is None' in source
-    assert 'result.prediction.pop("label", None)' in source
+def test_runtime_omits_optional_label_and_rank() -> None:
+    import analyze  # Establish the pinned upstream import path.
+    from runtime import normalize_prediction
+    from baselines.strong_rag_baseline.indexer import Chunk
+
+    chunk = Chunk("doc", "2024-01-01", 0, 8, "Evidence")
+    for family in ("regression", "ranking"):
+        result = normalize_prediction(
+            {"label": None, "rank": -3, "point_forecast": 1,
+             "interval": {"lo": 0, "hi": 2},
+             "evidence": [{"doc_id": "doc", "quote": "Evidence", "claim": "Context"}]},
+            {"target": {"type": family}}, {"entity_id": "one"}, [chunk])
+        assert "label" not in result
+        assert "rank" not in result
