@@ -54,6 +54,13 @@ OPTIVEX ADMISSION CHECK BEFORE OUTPUT:
 - A citation must support the label/value/ranking, not merely be topically related.
 - If excerpts conflict, favor the latest pre-cutoff passage and reflect conflict in uncertainty.
 - Do not mention this checklist, the council, or hidden reasoning in the JSON response.
+
+Before forecasting, internally distinguish each evidence observation period and publication
+date from the requested forecast period. Check that point_forecast and interval bounds
+describe the requested quantity, units, and denominator. For growth, change, or ratios, use
+only compatible supplied quantities and the required comparison period; do not substitute a
+historical level for a future change. Keep these checks internal and return the existing
+JSON shape only.
 """
 
 
