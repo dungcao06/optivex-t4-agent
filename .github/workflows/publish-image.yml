@@ -14,6 +14,29 @@ jobs:
       - name: Check out participant agent
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Check out pinned public Track 4 fixtures
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Agenthon-2026/track4-analysis-public
+          ref: 2b307560c8183905a030dcb4cd26ce857a039cfd
+          path: .upstream
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned test tools and published answer schema
+        run: |
+          python -m pip install "pytest==9.1.1" "jsonschema==4.26.0"
+          python -m pip install "qfbench2-common @ git+https://github.com/Agenthon-2026/Agenthon2026-public.git@68bc878a740eb0040e70ddf0feab98405dca1d6d#subdirectory=common"
+
+      - name: Test runtime and all public units over real HTTP
+        env:
+          T4_UPSTREAM_PATH: ${{ github.workspace }}/.upstream
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m pytest tests -q
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -28,14 +51,7 @@ jobs:
           provenance: false
           sbom: false
 
-      - name: Check out pinned public Track 4 fixtures
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: Agenthon-2026/track4-analysis-public
-          ref: 2b307560c8183905a030dcb4cd26ce857a039cfd
-          path: .upstream
-
-      - name: Verify image contract and run mock smoke test
+      - name: Verify image contract and restricted mock smoke
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/optivex-t4-agent:dev
         run: |
@@ -43,7 +59,17 @@ jobs:
           test "$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "qfbench2.interface_version" }}')" = 2.0
           docker run --rm "$IMAGE" analyze --help
           mkdir -p smoke-output
+          chmod 0777 smoke-output
+          cpu_limit="$(python -c 'import os; print(min(16, os.cpu_count() or 1))')"
+          # Restrictive smoke: these are cgroup ceilings, not a claim that the
+          # hosted runner has the organizer's 16 CPUs or 128 GiB of physical RAM.
           docker run --rm \
+            --read-only --user 65534:65534 --cap-drop=ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            --pids-limit 256 --ulimit nofile=1024:1024 --ulimit nproc=256:256 \
+            --cpus "$cpu_limit" --memory 128g --memory-swap 128g \
+            -e PYTHONDONTWRITEBYTECODE=1 \
             -v "$PWD/.upstream/units/t4-EXAMPLE-eps-beat:/input:ro" \
             -v "$PWD/smoke-output:/output" \
             "$IMAGE" analyze --mock \
@@ -51,6 +77,16 @@ jobs:
             --corpus /input/corpus \
             --out /output/answer.json
           python -m json.tool smoke-output/answer.json >/dev/null
+
+      - name: Test built container over real HTTP under restricted runtime
+        env:
+          T4_TEST_IMAGE: ghcr.io/${{ github.repository_owner }}/optivex-t4-agent:dev
+          T4_UPSTREAM_PATH: ${{ github.workspace }}/.upstream
+          PYTHONDONTWRITEBYTECODE: "1"
+        # The local server is a protocol fixture with canned predictions, not a
+        # House-model quality benchmark. Docker uses host networking to reach it.
+        # This does not reproduce or verify the organizer's outbound firewall.
+        run: python -m pytest tests/test_http_runtime.py -q
 
       - name: Sign in to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
