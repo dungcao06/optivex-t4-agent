@@ -9,7 +9,9 @@ import heapq
 import json
 import math
 import re
+from bisect import bisect_right
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -48,8 +50,61 @@ def _valid_date(value: object) -> date | None:
         return None
 
 
-def _passages(text: str):
-    """Yield overlapping original-text windows, preferring paragraph boundaries."""
+def _compact_tables(text: str) -> list[tuple[int, int]]:
+    """Recognize bounded pipe tables without normalizing the source text."""
+    lines = text.splitlines(keepends=True)
+    tables: list[tuple[int, int]] = []
+    offset = 0
+    index = 0
+    while index < len(lines):
+        if "|" not in lines[index]:
+            offset += len(lines[index])
+            index += 1
+            continue
+        first, start = index, offset
+        rows: list[list[str]] = []
+        valid = True
+        while index < len(lines) and "|" in lines[index]:
+            line = lines[index]
+            offset += len(line)
+            index += 1
+            if offset - start > _MAX_PASSAGE or "\\|" in line:
+                valid = False
+                continue
+            row = line.strip()
+            if row.startswith("|"):
+                row = row[1:]
+            if row.endswith("|"):
+                row = row[:-1]
+            cells = [cell.strip() for cell in row.split("|")]
+            if len(cells) < 2 or not all(cells) or (rows and len(cells) != len(rows[0])):
+                valid = False
+            rows.append(cells)
+        if not valid or len(rows) < 2 or not any(c.isalpha() for c in "".join(rows[0])):
+            continue
+        separators = [all(re.fullmatch(r":?-{3,}:?", cell) for cell in row) for row in rows]
+        has_separator = separators[1]
+        data_start = 2 if has_separator else 1
+        if len(rows) <= data_start or any(separators[data_start:]):
+            continue
+        if not has_separator and any(not any(c.isdigit() for c in "".join(row))
+                                     for row in rows[data_start:]):
+            continue
+        if first:
+            caption = lines[first - 1].strip()
+            caption_start = start - len(lines[first - 1])
+            if (caption and len(caption) <= 200 and "|" not in caption
+                    and (caption.endswith(":") or re.search(r"\bunits?\b", caption, re.I))
+                    and offset - caption_start <= _MAX_PASSAGE):
+                start = caption_start
+        tables.append((start, offset))
+    return tables
+
+
+def _passages(text: str) -> Iterator[tuple[int, int]]:
+    """Yield original-text windows, keeping recognized compact tables intact."""
+    tables = _compact_tables(text)
+    table_starts = [left for left, _ in tables]
     start = 0
     while start < len(text):
         end = min(start + _MAX_PASSAGE, len(text))
@@ -60,10 +115,25 @@ def _passages(text: str):
             boundary = paragraph if paragraph >= lower else space
             if boundary >= lower:
                 end = boundary + 1
+        cut_before_table = False
+        table_index = bisect_right(table_starts, end) - 1
+        if table_index >= 0:
+            left, right = tables[table_index]
+            if left < end < right:
+                if right - start <= _MAX_PASSAGE:
+                    end = right
+                else:
+                    end = left
+                    cut_before_table = True
         yield start, end
         if end == len(text):
             break
-        start = max(start + 1, end - _OVERLAP)
+        start = end if cut_before_table else max(start + 1, end - _OVERLAP)
+        table_index = bisect_right(table_starts, start) - 1
+        if table_index >= 0:
+            left, right = tables[table_index]
+            if left < start < right:
+                start = right
 
 
 def build_index(corpus_dir: str | Path) -> IndexedCorpus:
