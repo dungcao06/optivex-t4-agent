@@ -4,6 +4,16 @@ This is Team `optivex`'s Agenthon 2026 Track 4 agent. It uses the official stron
 
 Exact quotation matching establishes provenance, not semantic entailment. If inference cannot recover, the agent marks placeholder forecasts and context-only citations as `notes.fallback_quality="unverified"`. These are not a competitive prediction or a guarantee of passing the faithfulness gate. A missing eligible corpus cannot be repaired by inventing evidence.
 
+## Quantity-and-period prompt experiment
+
+This candidate adds an internal check for the requested quantity, units, denominator and
+forecast period, distinct from an evidence item's observation period and publication date.
+It asks the model to use compatible supplied quantities for changes, growth rates and ratios.
+The retrieval algorithm, model settings, runtime limits and output schema are unchanged.
+This is a narrow Logistics/Time-inspired prompt experiment, not a validated LTF trading
+strategy. Protocol tests can establish compatibility, not improved forecast quality; an
+official comparison is required before claiming a competitive gain.
+
 ## Local run
 
 From the official repository root (`track4-analysis-public/`):
