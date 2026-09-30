@@ -32,6 +32,31 @@ unchanged, though different passage boundaries can change retrieval rankings. Ge
 boundary tests and all six entities in the public rates fixture verify complete table
 retrieval, not improved prediction quality or leaderboard score.
 
+## Numeric identity and citation-context experiment
+
+Retrieval preserves standalone unsigned hyphenated numeric terms, such as `2-Year`
+and `10-Year`, without discarding their distinguishing number. Supported dash variants
+and horizontal spacing around the dash share a token; complete period decimals keep
+their fractional part. Ordinary number-word prose is not joined. Ambiguous numeric
+tails fall back to existing tokens rather than being interpreted as a different
+identity. Original corpus text, citation offsets and evidence limits are unchanged.
+
+Final citations are deduplicated by document and source offsets, independently of claim
+wording. Original unique citations take priority within the existing four-citation cap.
+If space remains, at most one additional citation preserves contiguous table context
+from the recognized caption/header through the quoted row's end. Recognition uses the
+original document, not an excerpt that could be a clipped oversized table. The whole
+recognized table must be inside the model-visible excerpt; unavailable or invalid
+optional metadata leaves the original citation intact.
+
+Citation enrichment leaves submitted forecasts and intervals unchanged. The combined
+candidate keeps prompt templates and House-model request limits unchanged, but retrieval
+can change the evidence supplied to the model and therefore its predictions. Enrichment
+can add judge work because the verifier evaluates every citation; retaining original
+spans does not guarantee unchanged verifier latency or successful evaluation. Local
+tests establish retrieval/citation integrity and protocol compatibility, not semantic
+entailment, a doubled score or a leaderboard improvement.
+
 ## Local run
 
 From the official repository root (`track4-analysis-public/`):
