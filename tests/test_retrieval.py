@@ -101,6 +101,153 @@ def test_target_terms_retrieve_relevant_passage_not_generic_earnings(tmp_path):
     assert chunks[0].doc_id == "solvency"
 
 
+@pytest.mark.parametrize("doc_ids", [("archive_a", "record_z"), ("record_z", "archive_a")])
+@pytest.mark.parametrize("tenor, expected_index", [("2-Year", 0), ("10-Year", 1)])
+def test_numeric_identity_retrieval_survives_document_renaming(tmp_path, doc_ids, tenor, expected_index):
+    """Catches tenor identity being discarded so names or document order pick the source."""
+    mod = retrieval_module()
+    for doc_id, maturity in zip(doc_ids, ("2-Year", "10-Year")):
+        write_doc(tmp_path, doc_id, f"Treasury {maturity} Note futures positioning history.")
+    corpus = mod.build_index(tmp_path)
+    selected = mod.EvidenceIndex(corpus, "2024-01-31").retrieve(
+        {"target": {"name": "positioning_change"}},
+        {"name": f"Treasury {tenor} Note futures"}, top_k=1,
+    )
+    assert [chunk.doc_id for chunk in selected] == [doc_ids[expected_index]]
+    assert selected[0].text == corpus.doc_texts[selected[0].doc_id]
+
+
+@pytest.mark.parametrize("identity", [
+    "7-Year", "7\u2010Year", "7\u2011Year", "7\u2012Year", "7\u2013Year", "7\u2014Year",
+    "7\u2015Year", "7\u2212Year", "7 - Year", "7\t-\tYear", "7\u00a0-\u00a0Year", "7\u202f-\u202fYear",
+])
+def test_numeric_identity_retrieval_matches_hyphens_whitespace_and_case(tmp_path, identity):
+    """Catches spelling variants dropping the joined identity from index or query."""
+    mod = retrieval_module()
+    text = f"Treasury {identity} Note futures positioning history."
+    write_doc(tmp_path, "a_unrelated", text.replace("7", "3"))
+    write_doc(tmp_path, "z_relevant", text)
+    corpus = mod.build_index(tmp_path)
+    selected = mod.EvidenceIndex(corpus, "2024-01-31").retrieve(
+        {"target": {"name": "positioning_change"}},
+        {"name": "TREASURY 7-yEaR NOTE FUTURES"}, top_k=1,
+    )
+    assert [chunk.doc_id for chunk in selected] == ["z_relevant"]
+    assert selected[0].text == text
+    assert (selected[0].span_start, selected[0].span_end) == (0, len(text))
+
+
+@pytest.mark.parametrize("unit", ["year", "month", "day"])
+@pytest.mark.parametrize("requested, other", [("5", "0.5"), ("0.5", "5")])
+def test_numeric_identity_retrieval_keeps_decimal_magnitude(tmp_path, unit, requested, other):
+    """Catches fractional tails such as 0.5-year falsely becoming the 5-year identity."""
+    mod = retrieval_module()
+    write_doc(tmp_path, "a_other", f"Treasury {other}-{unit} yield history.")
+    write_doc(tmp_path, "z_requested", f"Treasury {requested}-{unit} yield history.")
+    selected = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31").retrieve(
+        {"target": {"name": "yield_change"}}, {"tenor": f"{requested}-{unit}"}, top_k=1,
+    )
+    assert [chunk.doc_id for chunk in selected] == ["z_requested"]
+
+
+@pytest.mark.parametrize("prefix", ["Treasury 2-Year, ", "Treasury 2-Year,", "Maturity. ", "Maturity.\t"])
+def test_numeric_identity_retrieval_preserves_lists_and_sentence_boundaries(tmp_path, prefix):
+    """Catches prose punctuation hiding a requested maturity in a list or sentence."""
+    mod = retrieval_module()
+    write_doc(tmp_path, "a_other", f"{prefix}3-Year Note futures positioning history.")
+    text = f"{prefix}10-Year Note futures positioning history."
+    write_doc(tmp_path, "z_requested", text)
+    selected = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31").retrieve(
+        {"target": {"name": "positioning_change"}}, {"name": "Treasury 10-Year Note futures"}, top_k=1,
+    )
+    assert [chunk.doc_id for chunk in selected] == ["z_requested"]
+    assert selected[0].text == text
+
+
+def test_numeric_identity_tokens_retain_existing_terms_without_decimal_tail_aliases():
+    """Catches compound terms replacing word tokens or starting inside a decimal."""
+    tokens = retrieval_module()._tokens("Treasury 0.5-year and .5-year versus 5-year, 10-Year, 7-month.")
+    assert tokens.count("year") == 4
+    assert {"treasury", "versus", "10", "0.5year", "5year", "10year", "7month"} <= set(tokens)
+    assert tokens.count("5year") == 1
+
+
+@pytest.mark.parametrize("text, alias", [
+    (".5-year", "5year"), ("1.2.5-year", "5year"), ("ref35-year", "35year"),
+    ("35 year", "35year"), ("35\tyear", "35year"), ("35\u00a0year", "35year"),
+    ("0,5-year", "5year"), ("1,000-year", "000year"), ("1,000.5-year", "000.5year"),
+    ("-5-year", "5year"), ("+5-year", "5year"), ("-0.5-year", "0.5year"),
+    ("2\u20135-year", "5year"), ("1e-5-year", "5year"),
+    ("- 5-year", "5year"), ("2\u2013 5-year", "5year"), ("0, 5-year", "5year"),
+    ("+\t\u00a0 5-year", "5year"), ("1.\u202f5-year", "5year"),
+])
+def test_numeric_identity_tokens_do_not_join_partial_numbers_or_ordinary_prose(text, alias):
+    """Catches identities manufactured inside numbers or from ordinary numeric prose."""
+    tokens = retrieval_module()._tokens(text)
+    assert alias not in tokens
+
+
+@pytest.mark.parametrize("separator", [
+    "\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029",
+])
+@pytest.mark.parametrize("parts", [("35", "-year"), ("35-", "year")])
+def test_numeric_identity_tokens_do_not_join_across_line_boundaries(separator, parts):
+    """Catches Unicode/control line breaks being mistaken for horizontal spacing."""
+    text = separator.join(parts)
+    assert "35year" not in retrieval_module()._tokens(text)
+
+
+@pytest.mark.parametrize("form, alias", [("10-Q", "10q"), ("10-K", "10k")])
+def test_numeric_identity_tokens_do_not_join_single_letter_document_forms(form, alias):
+    """Catches new filing-type matches overpowering predictive terms in queries."""
+    tokens = retrieval_module()._tokens(form)
+    assert "10" in tokens
+    assert alias not in tokens
+
+
+def test_numeric_identity_retrieval_does_not_promote_calendar_prose_on_filing_cover():
+    """Catches bare numeric prose creating identity matches on a filing cover page."""
+    mod = retrieval_module()
+    unit = UPSTREAM / "units/t4-credit-event-2023"
+    task = json.loads((unit / "task.json").read_text(encoding="utf-8"))
+    entity = next(entity for entity in task["entities"] if entity["entity_id"] == "ODFL")
+    selected = mod.EvidenceIndex(mod.build_index(unit / "corpus"), task["cutoff_date"]).retrieve(task, entity)
+    assert not any(chunk.doc_id == "EDGAR_0000878927_10K_20230222" and chunk.span_start == 0
+                   for chunk in selected)
+
+
+def test_numeric_identity_retrieval_does_not_promote_document_form_on_filing_cover():
+    """Catches single-letter form terms returning a cover page for an earnings target."""
+    mod = retrieval_module()
+    unit = UPSTREAM / "units/t4-eps-yoy-2023Q2-mixed"
+    task = json.loads((unit / "task.json").read_text(encoding="utf-8"))
+    entity = next(entity for entity in task["entities"] if entity["entity_id"] == "HON")
+    selected = mod.EvidenceIndex(mod.build_index(unit / "corpus"), task["cutoff_date"]).retrieve(task, entity)
+    assert not any(chunk.doc_id == "EDGAR_0000773840_10Q_20230427" and chunk.span_start == 0
+                   for chunk in selected)
+
+
+def test_public_cot_numeric_identity_retrieves_matching_later_history():
+    """Catches 2-Year retrieval spending its last slot on the 10-Year history tail."""
+    mod = retrieval_module()
+    unit = UPSTREAM / "units/t4-cotpos-202411-us10"
+    task = json.loads((unit / "task.json").read_text(encoding="utf-8"))
+    corpus = mod.build_index(unit / "corpus")
+    index = mod.EvidenceIndex(corpus, task["cutoff_date"])
+    for entity_id, expected, other in [
+        ("UST_2Y", ("COT_UST_2Y_20241025", 1981, 3270), ("COT_UST_10Y_20241025", 1933, 3213)),
+        ("UST_10Y", ("COT_UST_10Y_20241025", 1933, 3213), ("COT_UST_2Y_20241025", 1981, 3270)),
+    ]:
+        entity = next(entity for entity in task["entities"] if entity["entity_id"] == entity_id)
+        selected = index.retrieve(task, entity)
+        spans = {(chunk.doc_id, chunk.span_start, chunk.span_end) for chunk in selected}
+        assert expected in spans, entity_id
+        assert other not in spans, entity_id
+        assert sum(len(chunk.text) for chunk in selected) <= 16000
+        assert all(chunk.text == corpus.doc_texts[chunk.doc_id][chunk.span_start:chunk.span_end]
+                   and len(chunk.text) <= 2200 for chunk in selected)
+
+
 def test_cik_affinity_separates_companies_but_preserves_shared_macro(tmp_path):
     """Catches retrieval spending the budget on another issuer's filing."""
     mod = retrieval_module()

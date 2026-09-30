@@ -23,6 +23,11 @@ _MIN_BREAK = 1600
 _OVERLAP = 200
 _EVIDENCE_BUDGET = 16000
 _TOKEN = re.compile(r"[a-z0-9]+")
+_NUMERIC_IDENTITY = re.compile(
+    r"(?<![\w.+\-\u2010-\u2015\u2212])([0-9]+(?:\.[0-9]+)?)"
+    r"[^\S\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*[-\u2010-\u2015\u2212]"
+    r"[^\S\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*([a-z]{2,})\b"
+)
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _STOP = frozenset(
     "a an and are as at be been before by can do each for from given in into is it "
@@ -177,8 +182,30 @@ def build_index(corpus_dir: str | Path) -> IndexedCorpus:
 
 
 def _tokens(value: object) -> list[str]:
-    return [word for word in _TOKEN.findall(str(value).lower())
-            if len(word) > 1 and word not in _STOP]
+    text = str(value).lower()
+    tokens = [word for word in _TOKEN.findall(text)
+              if len(word) > 1 and word not in _STOP]
+    # Add standalone unsigned number-word identities (2-Year vs 10-Year), with
+    # two-letter-or-longer words and horizontal spacing around an explicit hyphen.
+    for match in _NUMERIC_IDENTITY.finditer(text):
+        previous = match.start() - 1
+        while (previous >= 0 and text[previous].isspace()
+               and text[previous] not in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
+            previous -= 1
+        # A separated sign or range prefix is still ambiguous.
+        if previous >= 0 and text[previous] in "+-\u2010\u2011\u2012\u2013\u2014\u2015\u2212":
+            continue
+        if previous >= 0 and text[previous] in ".,":
+            previous -= 1
+            while (previous >= 0 and text[previous].isspace()
+                   and text[previous] not in "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
+                previous -= 1
+            # Preserve prose/list boundaries, but not decimal or grouped-number tails.
+            if (previous < 0 or text[previous].isdigit()
+                    or text[previous] in ".,+-\u2010\u2011\u2012\u2013\u2014\u2015\u2212"):
+                continue
+        tokens.append(match[1] + match[2])
+    return tokens
 
 
 def _cik(value: object) -> str | None:

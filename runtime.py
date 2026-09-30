@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 from baselines.strong_rag_baseline.cli import _mock_reply
-from retrieval import EvidenceIndex, build_index
+from retrieval import EvidenceIndex, _MAX_PASSAGE, _compact_tables, build_index
 
 REQUEST_LIMIT = 25
 BATCH_MARKER = "BATCH REQUESTS JSON:\n"
@@ -57,7 +57,41 @@ def finite_number(value) -> float:
     return number
 
 
-def normalize_prediction(raw: dict, task: dict, entity: dict, chunks: list) -> dict:
+def _table_context(claim: dict, chunk, table_spans) -> dict | None:
+    """Use original-document recognition, never a possibly clipped excerpt."""
+    if not isinstance(table_spans, dict):
+        return None
+    intervals = table_spans.get(claim["doc_id"])
+    if not isinstance(intervals, (list, tuple)):
+        return None
+    for bounds in intervals:
+        if (not isinstance(bounds, (list, tuple)) or len(bounds) != 2
+                or any(type(value) is not int for value in bounds)):
+            continue
+        left, right = bounds
+        if not (0 <= chunk.span_start <= left <= claim["span_start"]
+                < claim["span_end"] <= right <= chunk.span_end
+                and right - left <= _MAX_PASSAGE
+                and len(chunk.text) == chunk.span_end - chunk.span_start):
+            continue
+        # splitlines preserves CRLF and Unicode line separators in the offsets.
+        # The entire recognized table must fit, even when we cite an early row.
+        row_start, pipe_rows = left, 0
+        for line in chunk.text[left - chunk.span_start:right - chunk.span_start].splitlines(keepends=True):
+            row_end = row_start + len(line)
+            if "|" in line:
+                pipe_rows += 1
+                cells = line.strip().strip("|").split("|")
+                separator = all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+                if (pipe_rows > 1 and not separator
+                        and row_start < claim["span_end"] <= row_end):
+                    return dict(claim, span_start=left, span_end=row_end)
+            row_start = row_end
+    return None
+
+
+def normalize_prediction(raw: dict, task: dict, entity: dict, chunks: list, *,
+                         table_spans: dict[str, list[tuple[int, int]]] | None = None) -> dict:
     """Reject unsupported evidence; do not substitute a vaguely related passage."""
     if not isinstance(raw, dict):
         raise ValueError("Prediction must be an object")
@@ -82,6 +116,8 @@ def normalize_prediction(raw: dict, task: dict, entity: dict, chunks: list) -> d
     if not isinstance(items, list):
         raise ValueError("Evidence must be an array")
     claims = []
+    grounded_chunks = []
+    seen_spans = set()
     for item in items[:8]:
         if not isinstance(item, dict):
             continue
@@ -94,12 +130,26 @@ def normalize_prediction(raw: dict, task: dict, entity: dict, chunks: list) -> d
             if start >= 0:
                 grounded = {"doc_id": doc_id, "span_start": chunk.span_start + start,
                             "span_end": chunk.span_start + start + len(quote), "claim": claim.strip()}
-                if grounded not in claims:
+                source = (doc_id, grounded["span_start"], grounded["span_end"])
+                if source not in seen_spans:
                     claims.append(grounded)
+                    grounded_chunks.append(chunk)
+                    seen_spans.add(source)
                 break
     if not claims:
         raise ValueError("No exact quotation grounds in the supplied pre-cutoff excerpts")
-    prediction["claims"] = claims[:4]
+    claims = claims[:4]
+    # Originals have priority. At most one optional addition limits extra judge
+    # work; exact provenance is not proof of entailment or a score improvement.
+    if len(claims) < 4:
+        for claim, chunk in zip(claims, grounded_chunks):
+            context = _table_context(claim, chunk, table_spans)
+            if context is not None:
+                source = (context["doc_id"], context["span_start"], context["span_end"])
+                if source not in seen_spans:
+                    claims.append(context)
+                    break
+    prediction["claims"] = claims
     return prediction
 
 
@@ -185,6 +235,9 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
     index = EvidenceIndex(corpus, task["cutoff_date"])
     entities = task["entities"]
     contexts = [index.retrieve(task, entity, top_k=8) for entity in entities]
+    retrieved_docs = {chunk.doc_id for context in contexts for chunk in context}
+    table_spans = {doc_id: _compact_tables(corpus.doc_texts[doc_id])
+                   for doc_id in retrieved_docs if doc_id in corpus.doc_texts}
     prompts = [prompt_builder(task, entity, context) for entity, context in zip(entities, contexts)]
     client = BudgetedClient(system, started + 520, mock)
     predictions = [None] * len(entities)
@@ -234,7 +287,8 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
                         responses[value["entity_id"]] = value
                 for i in pending:
                     try:
-                        predictions[i] = normalize_prediction(responses.get(entities[i]["entity_id"]), task, entities[i], contexts[i])
+                        predictions[i] = normalize_prediction(responses.get(entities[i]["entity_id"]), task, entities[i], contexts[i],
+                                                               table_spans=table_spans)
                     except (ValueError, TypeError, OverflowError) as exc:
                         errors[str(entities[i]["entity_id"])] = _safe_error(exc)
             except (ValueError, TypeError, KeyError, OverflowError, OSError, http.client.HTTPException) as exc:

@@ -86,7 +86,10 @@ jobs:
         # The local server is a protocol fixture with canned predictions, not a
         # House-model quality benchmark. Docker uses host networking to reach it.
         # This does not reproduce or verify the organizer's outbound firewall.
-        run: python -m pytest tests/test_http_runtime.py -q
+        run: >-
+          python -m pytest tests/test_http_runtime.py
+          tests/test_citation_context.py::test_cli_wires_original_table_metadata_without_additional_model_requests
+          -q
 
       - name: Sign in to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
