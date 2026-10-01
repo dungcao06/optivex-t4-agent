@@ -231,3 +231,21 @@ def test_first_pass_reason_reaches_answer_without_extra_request(tmp_path, monkey
     assert_answer(answer, json.loads((EXAMPLE/'task.json').read_text()), EXAMPLE)
     from baselines.guardrails_example.citation_rail import check_submitted_reasons, load_corpus
     assert check_submitted_reasons(answer,load_corpus(EXAMPLE/'corpus'), '2024-03-15') == []
+
+
+def test_validation_specific_repair_over_http(tmp_path, monkeypatch):
+    import http_fixture
+    original = http_fixture.prompt_reply
+    def needs_feedback(payload, mode):
+        raw = json.loads(original(payload, mode))
+        prompt = payload['messages'][-1]['content']
+        if 'REPAIR ATTEMPT 1: interval_level' not in prompt:
+            raw['interval']['level'] = .5
+        return json.dumps(raw)
+    monkeypatch.setattr(http_fixture, 'prompt_reply', needs_feedback)
+    answer, requests = run_agent(tmp_path, EXAMPLE)
+    assert len(requests) == 2
+    assert answer['notes']['degraded_entities'] == 0
+    assert answer['notes']['validation_failures'] == {'interval_level': 1}
+    assert_answer(answer, json.loads((EXAMPLE/'task.json').read_text()), EXAMPLE)
+    assert_request_contract(requests)

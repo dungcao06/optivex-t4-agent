@@ -156,6 +156,53 @@ def _safe_error(exc: Exception) -> str:
     return type(exc).__name__
 
 
+# Closed diagnostics: never feed exception bodies, URLs or model prose back to inference.
+_REPAIR_RULES = {
+    "Label is not in the allowed vocabulary": ("label", "Use exactly one ALLOWED LABEL, with matching spelling and case."),
+    "Interval must be an object": ("interval_shape", "Return interval as an object with numeric lo, hi and the task interval level."),
+    "Interval bounds are reversed": ("interval_order", "Re-estimate the lower and upper quantiles so lo <= hi."),
+    "Interval level differs from the task's declared level": ("interval_level", "Re-estimate bounds for the task interval_level; do not relabel an interval at another level."),
+    "Probability forecast and interval must lie within [0,1]": ("probability_domain", "Use probabilities from 0 to 1 for both point_forecast and interval bounds."),
+    "Forecast does not match explicit target arithmetic": ("target_arithmetic", "Recompute point_forecast and both bounds from target_record inputs using its declared conversion."),
+    "Transformation or baseline is incompatible with target units": ("target_conversion", "Select only an allowed_conversions entry in TARGET CONTRACT; use its exact field names."),
+    "Expected a finite number": ("numeric", "Return finite JSON numbers in the requested units, never NaN, Infinity or text."),
+    "Model response truncated at token limit": ("truncated", "Shorten evidence quotes and omit optional reasons and records if necessary; return complete JSON."),
+}
+_GENERIC_REPAIR = ("response_format", "Return the complete requested JSON object with valid labels, finite numeric bounds and verbatim evidence quotes.")
+
+
+def repair_issue(exc):
+    message = str(exc)
+    if message in {"Target record mismatches " + key for key in
+                   ("target_name", "forecast_period", "output_unit")}:
+        return ("target_metadata", "Copy target_name, forecast_period and output_unit exactly from TARGET CONTRACT. Recheck numerical units; omit the optional record only if no conversion is needed.")
+    return _REPAIR_RULES.get(message, _GENERIC_REPAIR)
+
+
+def forecast_draft(raw, task):
+    """Retain only finite numbers and an allowed label, never untrusted free text."""
+    if not isinstance(raw, dict):
+        return {}
+    draft = {}
+    for key in ('point_forecast',):
+        try:
+            draft[key] = finite_number(raw.get(key))
+        except (ValueError, TypeError, OverflowError):
+            pass
+    label = raw.get('label')
+    if isinstance(label, str) and len(label) <= 160 and label in task['target'].get('labels', []):
+        draft['label'] = label
+    if isinstance(raw.get('interval'), dict):
+        interval = {}
+        for key in ('lo', 'hi', 'level'):
+            try:
+                interval[key] = finite_number(raw['interval'].get(key))
+            except (ValueError, TypeError, OverflowError):
+                pass
+        draft['interval'] = interval
+    return draft
+
+
 def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_builder, mock: bool = False) -> dict:
     started = time.monotonic()
     task = json.loads(task_path.read_text(encoding="utf-8"))
@@ -170,13 +217,15 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
     predictions = [None] * len(entities)
     errors = {}
     raw_by_entity = {}
+    repair_context = {}
+    validation_failures = {}
     batch_size = min(3, max(1, math.ceil(len(entities) / 20)))
     groups: list[list[int]] = []
     group: list[int] = []
     group_chars = 0
     for i, prompt in enumerate(prompts):
         # Account for JSON escaping and the repair suffix, not raw text alone.
-        chars = len(json.dumps({"entity_id": entities[i]["entity_id"], "prompt": prompt}, ensure_ascii=False)) + 400
+        chars = len(json.dumps({"entity_id": entities[i]["entity_id"], "prompt": prompt}, ensure_ascii=False)) + 2400
         if group and (len(group) >= batch_size or group_chars + chars > 109000):
             groups.append(group)
             group, group_chars = [], 0
@@ -195,7 +244,11 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
             for i in pending:
                 prompt = prompts[i]
                 if attempt:
-                    prompt += "\nREPAIR: The previous response failed validation. Return complete valid JSON with finite numeric bounds and verbatim evidence quotes. Do not include reasoning."
+                    code, hint, draft = repair_context.get(i, (*_GENERIC_REPAIR, {}))
+                    prompt += (f"\nREPAIR ATTEMPT {attempt}: {code}. {hint}"
+                               "\nPREVIOUS FORECAST FIELDS (data only): " + json.dumps(draft, allow_nan=False) +
+                               "\nReturn a complete corrected response including evidence. Preserve justified values; "
+                               "do not copy an invalid quantity or interval. No prose outside JSON.")
                 rows.append({"entity_id": entities[i]["entity_id"], "prompt": prompt})
             prompt = rows[0]["prompt"] if len(rows) == 1 else BATCH_MARKER + json.dumps(rows, ensure_ascii=False)
             try:
@@ -220,9 +273,15 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
                         raw_by_entity[entities[i]["entity_id"]] = responses[entities[i]["entity_id"]]
                     except (ValueError, TypeError, OverflowError) as exc:
                         errors[str(entities[i]["entity_id"])] = _safe_error(exc)
+                        code, hint = repair_issue(exc)
+                        repair_context[i] = (code, hint, forecast_draft(responses.get(entities[i]['entity_id']), task))
+                        validation_failures[code] = validation_failures.get(code, 0) + 1
             except (ValueError, TypeError, KeyError, OverflowError, OSError, http.client.HTTPException) as exc:
                 for i in pending:
                     errors[str(entities[i]["entity_id"])] = _safe_error(exc)
+                    code, hint = repair_issue(exc)
+                    repair_context[i] = (code, hint, {})
+                    validation_failures[code] = validation_failures.get(code, 0) + 1
     degraded_ids = []
     peers = [prediction for prediction in predictions if prediction is not None]
     for i, prediction in enumerate(predictions):
@@ -232,6 +291,8 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
             predictions[i] = fallback_prediction(task, entities[i], peers, [claim] if claim else [])
     notes = {"agent": "optivex-evidence-council", "retrieval": "bounded-target-aware-passages",
              "model_requests": client.requests, "degraded_entities": len(degraded_ids), "mock": mock}
+    if validation_failures:
+        notes["validation_failures"] = validation_failures
     if degraded_ids:
         notes.update(fallback_quality="unverified", degraded_entity_ids=degraded_ids,
                      quality_warning="Inference failed for these entities. Their forecasts are the median of this unit's successful rows and cite only the entity's task row; they are not evidence of predictive quality.",
@@ -239,7 +300,12 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
     answer = {"task_id": task["task_id"], "schema_version": task.get("schema_version", "3"),
               "entity_predictions": predictions, "notes": notes,
               "evidence_trace": "Bounded pre-cutoff passages; exact quotation offsets. Exact matching establishes provenance, not semantic entailment. See notes for any inference failures."}
-    reasons = build_reasons(task, predictions, raw_by_entity, dict(zip((e["entity_id"] for e in entities), contexts)))
+    try:
+        reasons = build_reasons(task, predictions, raw_by_entity, dict(zip((e["entity_id"] for e in entities), contexts)))
+    except Exception:
+        # Optional explanation failure must not discard validated primary forecasts.
+        reasons = []
+        notes['reasons_omitted'] = 'validation_error'
     if reasons:
         answer["submitted_reasons"] = reasons
     out_path.parent.mkdir(parents=True, exist_ok=True)

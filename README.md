@@ -132,3 +132,14 @@ Only reasons that match the final prediction, original evidence and pinned deter
 guardrails are submitted; otherwise the optional block is omitted. Premises containing
 deny-list terms are conservatively omitted. This verifies structure and provenance, not
 reasoning quality. Reasoning is evaluated separately on Final units, not Development.
+
+## Bounded corrective retries
+
+Failed rows receive a closed validation category, correction guidance, and only finite
+numeric fields plus an allowed label from their previous response. Exception bodies and
+model-authored prose are excluded. Retries keep the existing 25-request/520-second unit
+budget and preserve successful peers. Notes count validation categories, including those
+recovered by a retry. Unexpected optional-reason validation errors omit that block while
+retaining valid primary predictions. Forecast prompts specify the requested central
+quantiles and an absolute-error regression point objective; improvement still requires
+an organizer evaluation.
