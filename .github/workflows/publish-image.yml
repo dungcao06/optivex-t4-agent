@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Agenthon-2026/track4-analysis-public
-          ref: 2b307560c8183905a030dcb4cd26ce857a039cfd
+          ref: ede7381d8c1ba9d8c84068f9d142f5e093a33892
           path: .upstream
 
       - name: Set up Python
@@ -29,7 +29,7 @@ jobs:
       - name: Install pinned test tools and published answer schema
         run: |
           python -m pip install "pytest==9.1.1" "jsonschema==4.26.0"
-          python -m pip install "qfbench2-common @ git+https://github.com/Agenthon-2026/Agenthon2026-public.git@68bc878a740eb0040e70ddf0feab98405dca1d6d#subdirectory=common"
+          python -m pip install "qfbench2-common @ git+https://github.com/Agenthon-2026/Agenthon2026-public.git@50fb2dc2b39c70f4cf81fcd269943782eddfaed0#subdirectory=common"
 
       - name: Test runtime and all public units over real HTTP
         env:
