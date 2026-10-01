@@ -212,3 +212,22 @@ def test_thirty_entities_fit_within_total_http_budget(tmp_path, mode):
         assert answer["notes"]["degraded_entities"] == 30
     else:
         assert answer.get("notes", {}).get("degraded_entities", 0) == 0
+
+
+def test_first_pass_reason_reaches_answer_without_extra_request(tmp_path, monkeypatch):
+    import http_fixture
+    original = http_fixture.prompt_reply
+    def with_reason(payload, mode):
+        raw = json.loads(original(payload, mode))
+        fact = raw['evidence'][0]
+        raw['reason'] = {'premise': fact['quote'], 'quote': fact['quote'], 'doc_id': fact['doc_id'],
+                         'mechanism': 'The observed revenue base informs expected earnings capacity.',
+                         'answer_implication': 'AAPL: label=' + raw['label']}
+        return json.dumps(raw)
+    monkeypatch.setattr(http_fixture, 'prompt_reply', with_reason)
+    answer, requests = run_agent(tmp_path, EXAMPLE)
+    assert len(requests) == 1
+    assert len(answer.get('submitted_reasons', [])) == 1
+    assert_answer(answer, json.loads((EXAMPLE/'task.json').read_text()), EXAMPLE)
+    from baselines.guardrails_example.citation_rail import check_submitted_reasons, load_corpus
+    assert check_submitted_reasons(answer,load_corpus(EXAMPLE/'corpus'), '2024-03-15') == []

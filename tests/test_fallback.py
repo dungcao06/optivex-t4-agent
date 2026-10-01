@@ -58,3 +58,17 @@ def test_mixed_classification_peers_use_the_same_rows_for_point_and_interval():
     row = fallback_prediction(CLS, {"entity_id": "c"}, peers, CLAIM)
     assert row["point_forecast"] == 50.0
     assert row["interval"] == {"level": 0.9, "lo": 49.0, "hi": 51.0}
+
+
+def test_probability_fallback_without_success_is_in_domain():
+    t={'prompt':'Give point_forecast as probability (0 to 1)', 'target':{'type':'classification','labels':['yes','no']}}
+    r=fallback_prediction(t, {'entity_id':'lost'}, [], CLAIM)
+    assert 0 <= r['interval']['lo'] <= r['point_forecast'] <= r['interval']['hi'] <= 1
+
+
+def test_peer_values_with_different_units_are_not_mixed():
+    t={'target':{'type':'regression'},'entities':[{'entity_id':'a','units':'dollars'},
+        {'entity_id':'b','units':'thousands of persons'},{'entity_id':'c','units':'dollars'}]}
+    p1={**peer(5,4,6),'entity_id':'a'};p2={**peer(1,.5,1.5),'entity_id':'b'}
+    r=fallback_prediction(t,t['entities'][2],[p1,p2],CLAIM)
+    assert (r['point_forecast'],r['interval']['lo'],r['interval']['hi'])==(5,4,6)

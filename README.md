@@ -76,8 +76,8 @@ Without `--mock`, the official harness supplies `MODEL_ENDPOINT`, `MODEL_NAME`, 
 
 ## Container
 
-The Dockerfile is standalone. During the build it fetches only the official strong-RAG
-directory and MIT license at pinned commit `2b307560c8183905a030dcb4cd26ce857a039cfd`.
+The Dockerfile is standalone. During the build it fetches the official strong-RAG and citation guardrail
+directories and MIT license at pinned commit `ede7381d8c1ba9d8c84068f9d142f5e093a33892`.
 The Python base image and every write-capable GitHub Action are pinned by digest/commit.
 
 Build locally from this directory when a Docker engine is available:
@@ -117,3 +117,18 @@ to run the HTTP integration suite inside a locally built Docker image on Linux.
 ## Secrets
 
 Do not put the Agenthon Team Key, model token, registry credentials, or account credentials in this directory or image.
+
+## Target checks and grounded reasons
+
+The prompt declares task-derived output units, forecast period and permitted conversions.
+Optional arithmetic records are checked against task baselines and denominators; probability
+points and intervals must lie in [0, 1]. Retrieval can add one complementary absolute GAAP
+EPS baseline while retaining the leading driver passages and existing evidence limits.
+Fallbacks use compatible-unit peers, or [0, 1] for probabilities without peers. Other empty
+peer cases retain the legacy placeholder and are marked unverified.
+
+A successful first response may supply a grounded reason without an extra model request.
+Only reasons that match the final prediction, original evidence and pinned deterministic
+guardrails are submitted; otherwise the optional block is omitted. Premises containing
+deny-list terms are conservatively omitted. This verifies structure and provenance, not
+reasoning quality. Reasoning is evaluated separately on Final units, not Development.

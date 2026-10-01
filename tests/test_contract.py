@@ -9,7 +9,7 @@ def test_prompt_enforces_evidence_and_embargo() -> None:
     assert "Do not use memory" in source
     assert "after the cutoff date" in source
     assert "copied verbatim" in source
-    assert "must support the label/value/ranking" in source
+    assert "Quote relevant observed facts" in source
 
 
 def test_container_declares_interface_and_verb() -> None:

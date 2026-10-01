@@ -1,4 +1,4 @@
-"""Claims that Track 4 scorer 5.2.2 cannot mark false.
+"""Bounded extractive claims for Track 4 scorer 5.2.2.
 
 From scorer 5.2.0 a claim earns nothing and each false claim multiplies the unit's score by
 1 - F / (F + min(T, 3E)). So every claim here is a short verbatim quote of a span its entity may
@@ -9,6 +9,7 @@ manifest; the scorer applies the same labels from the unit manifest.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 TASK_DOC_ID = "task"
@@ -105,6 +106,16 @@ def task_row_claim(task: dict, entity_id: str) -> dict | None:
     return {"doc_id": TASK_DOC_ID, "span_start": start, "span_end": start + len(text), "claim": text}
 
 
+def _has_figure(quote: str, task: dict) -> bool:
+    """Exclude URI and roster-name digits, which the scorer exempts as figures."""
+    text = re.sub(r"(?:https?://|www\.)\S+", "", quote, flags=re.I)
+    names = {str(row[key]) for row in task.get("entities", []) if isinstance(row, dict)
+             for key in ("entity_id", "name", "ticker") if row.get(key)}
+    for name in sorted(names, key=len, reverse=True):
+        text = re.sub(re.escape(name), "", text, flags=re.I)
+    return bool(re.search(r"(?<![A-Za-z0-9])[-+]?\d+(?:[.,]\d+)*(?![A-Za-z])", text))
+
+
 def build_claims(items: object, chunks: list, task: dict, entity_id: str,
                  owners: Ownership | None) -> list[dict]:
     """Verbatim, citable quotes from the model's evidence; the entity's task row if none survive."""
@@ -120,7 +131,7 @@ def build_claims(items: object, chunks: list, task: dict, entity_id: str,
             continue
         quote = trim_quote(quote.strip())
         # A figure keeps a verbatim quote from being judged content-free.
-        if (len(quote) < MIN_CLAIM_CHARS or not any(c.isdigit() for c in quote)
+        if (len(quote) < MIN_CLAIM_CHARS or not _has_figure(quote, task)
                 or not may_cite(owners, doc_id, entity_id)):
             continue
         for chunk in chunks:

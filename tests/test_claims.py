@@ -205,3 +205,11 @@ def test_document_whose_internal_id_differs_from_its_file_name_is_not_citable(tm
     (tmp_path / "B.json").write_text(json.dumps({"doc_id": "B", "text": "beta"}))
     owners = load_ownership(tmp_path)
     assert not may_cite(owners, "A", "x") and may_cite(owners, "B", "x")
+
+
+def test_entity_identifier_digits_are_not_a_content_figure():
+    text = 'Available evidence for UST10Y.'
+    task = {'entities': [{'entity_id': 'UST10Y'}]}
+    owners = {'doc': (frozenset({'UST10Y'}), False)}
+    claims = build_claims([item(text)], [chunk(text)], task, 'UST10Y', owners)
+    assert claims == [task_row_claim(task, 'UST10Y')]

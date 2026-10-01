@@ -18,6 +18,8 @@ from pathlib import Path
 
 from baselines.strong_rag_baseline.cli import _mock_reply
 from claims import Ownership, build_claims, citable_note, load_ownership, task_row_claim
+from reasons import build_reasons
+from targets import validate_target
 from fallback import fallback_prediction
 from retrieval import EvidenceIndex, build_index
 
@@ -85,6 +87,7 @@ def normalize_prediction(raw: dict, task: dict, entity: dict, chunks: list, *,
         if not math.isclose(returned / 100 if returned > 1 else returned, level, abs_tol=1e-6):
             raise ValueError("Interval level differs from the task's declared level")
     prediction["interval"] = {"level": level, "lo": lo, "hi": hi}
+    validate_target(raw, prediction, task, entity)
     # Per-row calls cannot establish a cross-roster rank. The scorer uses the
     # comparable point_forecast vector; omit the optional, often invalid rank.
     claims = build_claims(raw.get("evidence"), chunks, task, entity["entity_id"], owners)
@@ -166,6 +169,7 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
     client = BudgetedClient(system, started + 520, mock)
     predictions = [None] * len(entities)
     errors = {}
+    raw_by_entity = {}
     batch_size = min(3, max(1, math.ceil(len(entities) / 20)))
     groups: list[list[int]] = []
     group: list[int] = []
@@ -213,6 +217,7 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
                     try:
                         predictions[i] = normalize_prediction(responses.get(entities[i]["entity_id"]), task, entities[i], contexts[i],
                                                                owners=owners)
+                        raw_by_entity[entities[i]["entity_id"]] = responses[entities[i]["entity_id"]]
                     except (ValueError, TypeError, OverflowError) as exc:
                         errors[str(entities[i]["entity_id"])] = _safe_error(exc)
             except (ValueError, TypeError, KeyError, OverflowError, OSError, http.client.HTTPException) as exc:
@@ -234,6 +239,9 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
     answer = {"task_id": task["task_id"], "schema_version": task.get("schema_version", "3"),
               "entity_predictions": predictions, "notes": notes,
               "evidence_trace": "Bounded pre-cutoff passages; exact quotation offsets. Exact matching establishes provenance, not semantic entailment. See notes for any inference failures."}
+    reasons = build_reasons(task, predictions, raw_by_entity, dict(zip((e["entity_id"] for e in entities), contexts)))
+    if reasons:
+        answer["submitted_reasons"] = reasons
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(answer, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")
     return answer
