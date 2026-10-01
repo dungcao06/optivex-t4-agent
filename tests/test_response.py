@@ -44,7 +44,8 @@ def test_classification_can_omit_an_undefined_numeric_forecast():
     from baselines.strong_rag_baseline.indexer import Chunk
     raw = {"label": "beat", "point_forecast": None, "interval": {"lo": 1, "hi": 2},
            "evidence": [{"doc_id": "doc", "quote": "Evidence", "claim": "Context"}]}
-    result = normalize_prediction(raw, {"target": {"type": "classification", "labels": ["beat"]}},
+    result = normalize_prediction(raw, {"target": {"type": "classification", "labels": ["beat"]},
+                                   "entities": [{"entity_id": "one"}]},
                                   {"entity_id": "one"}, [Chunk("doc", "2024-01-01", 0, 8, "Evidence")])
     assert result["label"] == "beat"
     assert "point_forecast" not in result

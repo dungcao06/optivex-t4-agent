@@ -21,7 +21,7 @@ WORKDIR /app
 COPY --from=source /tmp/track4/baselines/strong_rag_baseline /app/baselines/strong_rag_baseline
 COPY --from=source /tmp/track4/LICENSE /usr/share/licenses/optivex/track4-analysis-public-LICENSE
 COPY analyze.py /app/analyze.py
-COPY runtime.py retrieval.py /app/
+COPY runtime.py retrieval.py claims.py fallback.py /app/
 COPY LICENSE /usr/share/licenses/optivex/participant-LICENSE
 
 ENTRYPOINT ["python", "/app/analyze.py"]
