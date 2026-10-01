@@ -76,3 +76,46 @@ def task_row_claim(task: dict, entity_id: str) -> dict | None:
     line, start = found
     text = trim_quote(line)
     return {"doc_id": TASK_DOC_ID, "span_start": start, "span_end": start + len(text), "claim": text}
+
+
+def build_claims(items: object, chunks: list, task: dict, entity_id: str,
+                 owners: Ownership | None) -> list[dict]:
+    """Verbatim, citable quotes from the model's evidence; the entity's task row if none survive."""
+    claims: list[dict] = []
+    seen: set[tuple[str, int, int]] = set()
+    for item in (items if isinstance(items, list) else [])[:8]:
+        if len(claims) == MAX_CLAIMS:
+            break
+        if not isinstance(item, dict):
+            continue
+        doc_id, quote = item.get("doc_id"), item.get("quote")
+        if not isinstance(doc_id, str) or not isinstance(quote, str):
+            continue
+        quote = trim_quote(quote.strip())
+        if len(quote) < MIN_CLAIM_CHARS or not may_cite(owners, doc_id, entity_id):
+            continue
+        for chunk in chunks:
+            start = chunk.text.find(quote) if chunk.doc_id == doc_id else -1
+            if start >= 0:
+                source = (doc_id, chunk.span_start + start, chunk.span_start + start + len(quote))
+                if source not in seen:
+                    seen.add(source)
+                    claims.append({"doc_id": doc_id, "span_start": source[1],
+                                   "span_end": source[2], "claim": quote})
+                break
+    if not claims:
+        row = task_row_claim(task, entity_id)
+        if row is not None:
+            claims.append(row)
+    return claims
+
+
+def citable_note(owners: Ownership | None, entity_id: str, chunks: list) -> str:
+    """Prompt suffix naming the excerpts this entity may quote."""
+    ids = sorted({chunk.doc_id for chunk in chunks if may_cite(owners, chunk.doc_id, entity_id)})
+    if not ids:
+        return ("\nCITATION RULE: none of these excerpts may be quoted for this entity. Use them "
+                'as context and return "evidence": [].')
+    return ("\nCITATION RULE: quote only from doc_id " + ", ".join(ids) + ". Other excerpts are "
+            "context about other entities: use them, never quote them. Each quote is one exact "
+            "sentence or table row of at most 300 characters that contains a figure.")

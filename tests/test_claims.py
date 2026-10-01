@@ -76,3 +76,95 @@ def test_ownership_matches_the_scorer_on_every_public_document(unit):
     for doc_id, doc in index._docs.items():
         for entity in task["entities"]:
             assert may_cite(owners, doc_id, entity["entity_id"]) == doc.admits(entity["entity_id"])
+
+
+from baselines.strong_rag_baseline.indexer import Chunk  # noqa: E402
+from claims import MAX_CLAIMS, build_claims, citable_note  # noqa: E402
+
+TASK = {"target": {"type": "regression"}, "interval_level": 0.9,
+        "entities": [{"entity_id": "one", "start_yield_pct": 3.73}, {"entity_id": "two"}]}
+OWNERS = {"doc": (frozenset({"one"}), False), "peer": (frozenset({"two"}), False),
+          "shared": (frozenset(), True)}
+S1, S2, S3, S4 = ("Alpha yield rose to 4.25 percent.", "Beta spread was 12 basis points.",
+                  "Gamma auction drew 2.61 times.", "Delta supply grew 7 percent.")
+TEXT = " ".join([S1, S2, S3, S4])
+
+
+def chunk(text: str, *, start: int = 0, doc_id: str = "doc") -> Chunk:
+    return Chunk(doc_id, "2024-01-01", start, start + len(text), text)
+
+
+def item(quote: str, doc_id: str = "doc") -> dict:
+    return {"doc_id": doc_id, "quote": quote, "claim": "model prose with 999 percent"}
+
+
+def test_claim_text_is_the_exact_quote_not_model_prose():
+    claims = build_claims([item(S1)], [chunk(TEXT, start=100)], TASK, "one", OWNERS)
+    assert claims == [{"doc_id": "doc", "span_start": 100, "span_end": 100 + len(S1), "claim": S1}]
+
+
+def test_peer_documents_are_never_cited_and_shared_ones_are():
+    chunks = [chunk(TEXT), chunk(TEXT, doc_id="peer"), chunk(TEXT, doc_id="shared")]
+    claims = build_claims([item(S1, "peer"), item(S2, "shared")], chunks, TASK, "one", OWNERS)
+    assert [c["doc_id"] for c in claims] == ["shared"]
+
+
+def test_duplicates_collapse_and_at_most_three_claims_survive():
+    raw = [item(S1), item(S1), item(S2), item(S3), item(S4)]
+    claims = build_claims(raw, [chunk(TEXT)], TASK, "one", OWNERS)
+    assert [c["claim"] for c in claims] == [S1, S2, S3] and len(claims) == MAX_CLAIMS
+
+
+def test_only_the_first_eight_raw_items_are_read():
+    claims = build_claims([item(S1)] * 8 + [item(S2)], [chunk(TEXT)], TASK, "one", OWNERS)
+    assert [c["claim"] for c in claims] == [S1]
+
+
+@pytest.mark.parametrize("raw", [None, "text", [], [item("not in the excerpt at all, 5 percent")],
+                                 [item("tiny")], [{"doc_id": ["doc"], "quote": S1}]])
+def test_unusable_evidence_falls_back_to_the_entity_task_row(raw):
+    claims = build_claims(raw, [chunk(TEXT)], TASK, "one", OWNERS)
+    assert claims == [task_row_claim(TASK, "one")]
+
+
+def test_unknown_ownership_cites_only_the_task_row():
+    claims = build_claims([item(S1)], [chunk(TEXT)], TASK, "one", None)
+    assert claims == [task_row_claim(TASK, "one")]
+
+
+def test_long_quotes_are_trimmed_to_a_verbatim_prefix():
+    long = "Alpha yield rose " + "and kept rising " * 60 + "to 4.25 percent."
+    claims = build_claims([item(long)], [chunk(long)], TASK, "one", OWNERS)
+    assert len(claims[0]["claim"]) <= 600 and long.startswith(claims[0]["claim"])
+    assert claims[0]["span_end"] - claims[0]["span_start"] == len(claims[0]["claim"])
+
+
+def test_citable_note_names_only_citable_documents():
+    chunks = [chunk(TEXT), chunk(TEXT, doc_id="peer"), chunk(TEXT, doc_id="shared")]
+    note = citable_note(OWNERS, "one", chunks)
+    assert "doc, shared" in note and "peer" not in note
+    assert '"evidence": []' in citable_note(OWNERS, "one", [chunk(TEXT, doc_id="peer")])
+
+
+@pytest.mark.parametrize("unit", UNITS, ids=lambda p: p.name)
+def test_scorer_finds_no_false_claim_when_the_model_quotes_every_excerpt(unit):
+    """The model may quote any excerpt; build_claims must leave only claims the scorer accepts."""
+    from baselines.guardrails_example.citation_rail import check_claim_rules
+    from retrieval import EvidenceIndex, build_index
+    task = json.loads((unit / "task.json").read_text())
+    owners = load_ownership(unit / "corpus")
+    index = EvidenceIndex(build_index(unit / "corpus"), task["cutoff_date"])
+    rows = []
+    for entity in task["entities"]:
+        chunks = index.retrieve(task, entity, top_k=8)
+        raw = [item(c.text[:240].strip(), c.doc_id) for c in chunks]
+        row = {"entity_id": entity["entity_id"], "point_forecast": 0.0,
+               "interval": {"level": task["interval_level"], "lo": -1.0, "hi": 1.0},
+               "claims": build_claims(raw, chunks, task, entity["entity_id"], owners)}
+        if task["target"]["type"] == "classification":
+            row["label"] = task["target"]["labels"][0]
+        rows.append(row)
+    answer = {"task_id": task["task_id"], "schema_version": "3", "entity_predictions": rows}
+    findings = [f for f in check_claim_rules(answer, unit, token_counter=None)
+                if f.code != "claim_tokens_unchecked"]
+    assert findings == []
