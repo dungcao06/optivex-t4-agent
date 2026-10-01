@@ -78,7 +78,13 @@ def normalize_prediction(raw: dict, task: dict, entity: dict, chunks: list, *,
     lo, hi = finite_number(interval.get("lo")), finite_number(interval.get("hi"))
     if lo > hi:
         raise ValueError("Interval bounds are reversed")
-    prediction["interval"] = {"level": task.get("interval_level", 0.9), "lo": lo, "hi": hi}
+    level = task.get("interval_level", 0.9)
+    if interval.get("level") is not None:
+        returned = finite_number(interval["level"])
+        # A band at another level would be scored as the task's level; repair, never relabel.
+        if not math.isclose(returned / 100 if returned > 1 else returned, level, abs_tol=1e-6):
+            raise ValueError("Interval level differs from the task's declared level")
+    prediction["interval"] = {"level": level, "lo": lo, "hi": hi}
     # Per-row calls cannot establish a cross-roster rank. The scorer uses the
     # comparable point_forecast vector; omit the optional, often invalid rank.
     claims = build_claims(raw.get("evidence"), chunks, task, entity["entity_id"], owners)
