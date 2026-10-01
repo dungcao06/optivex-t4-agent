@@ -135,7 +135,7 @@ def test_unknown_ownership_cites_only_the_task_row():
 def test_long_quotes_are_trimmed_to_a_verbatim_prefix():
     long = "Alpha yield rose " + "and kept rising " * 60 + "to 4.25 percent."
     claims = build_claims([item(long)], [chunk(long)], TASK, "one", OWNERS)
-    assert len(claims[0]["claim"]) <= 600 and long.startswith(claims[0]["claim"])
+    assert len(claims[0]["claim"]) <= MAX_CLAIM_CHARS and long.startswith(claims[0]["claim"])
     assert claims[0]["span_end"] - claims[0]["span_start"] == len(claims[0]["claim"])
 
 

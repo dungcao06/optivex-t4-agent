@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 TASK_DOC_ID = "task"
-MAX_CLAIM_CHARS = 600   # Far below the 4,000-character and 400-judge-token claim limits.
+MAX_CLAIM_CHARS = 400   # Densest public 600-char window measured 375 judge tokens (cap 400).
 MIN_CLAIM_CHARS = 20
 MAX_CLAIMS = 3
 
