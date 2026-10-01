@@ -12,11 +12,12 @@ LEGACY_LABELS = ("inline", "neutral", "unchanged")
 
 
 def fallback_prediction(task: dict, entity: dict, peers: list[dict], claims: list[dict]) -> dict:
-    values = [p["point_forecast"] for p in peers if "point_forecast" in p]
-    if values:
-        point = float(statistics.median(values))
-        lo = min(float(statistics.median([p["interval"]["lo"] for p in peers])), point)
-        hi = max(float(statistics.median([p["interval"]["hi"] for p in peers])), point)
+    scored = [p for p in peers if "point_forecast" in p]
+    if scored:
+        # median_low returns a peer's own value: no averaging, so no overflow to infinity.
+        point = float(statistics.median_low([p["point_forecast"] for p in scored]))
+        lo = min(float(statistics.median_low([p["interval"]["lo"] for p in scored])), point)
+        hi = max(float(statistics.median_low([p["interval"]["hi"] for p in scored])), point)
     else:
         point, lo, hi = 0.0, -1.0, 1.0
     row = {"entity_id": entity["entity_id"], "point_forecast": point,

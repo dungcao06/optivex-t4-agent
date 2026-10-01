@@ -1,6 +1,8 @@
 """Fallback rows come from the unit's successful rows, never an unconditional placeholder."""
 from __future__ import annotations
 
+import json
+import math
 import sys
 from pathlib import Path
 
@@ -43,3 +45,16 @@ def test_without_peers_the_legacy_values_remain():
 def test_interval_always_contains_the_point():
     row = fallback_prediction(REG, {"entity_id": "c"}, [peer(5.0, 0.0, 1.0), peer(6.0, 0.0, 1.0)], CLAIM)
     assert row["interval"]["lo"] <= row["point_forecast"] <= row["interval"]["hi"]
+
+
+def test_huge_peer_values_stay_finite_and_serializable():
+    row = fallback_prediction(REG, {"entity_id": "c"}, [peer(1e308, 1e308, 1e308)] * 2, CLAIM)
+    assert all(math.isfinite(v) for v in (row["point_forecast"], row["interval"]["lo"], row["interval"]["hi"]))
+    json.dumps(row, allow_nan=False)
+
+
+def test_mixed_classification_peers_use_the_same_rows_for_point_and_interval():
+    peers = [peer(50.0, 49.0, 51.0, "up"), {"label": "up", "interval": {"level": 0.9, "lo": 0.1, "hi": 0.5}}]
+    row = fallback_prediction(CLS, {"entity_id": "c"}, peers, CLAIM)
+    assert row["point_forecast"] == 50.0
+    assert row["interval"] == {"level": 0.9, "lo": 49.0, "hi": 51.0}

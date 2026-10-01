@@ -133,7 +133,7 @@ def test_unknown_ownership_cites_only_the_task_row():
 
 
 def test_long_quotes_are_trimmed_to_a_verbatim_prefix():
-    long = "Alpha yield rose " + "and kept rising " * 60 + "to 4.25 percent."
+    long = "Alpha yield rose 4.25 percent " + "and kept rising " * 60 + "to the end."
     claims = build_claims([item(long)], [chunk(long)], TASK, "one", OWNERS)
     assert len(claims[0]["claim"]) <= MAX_CLAIM_CHARS and long.startswith(claims[0]["claim"])
     assert claims[0]["span_end"] - claims[0]["span_start"] == len(claims[0]["claim"])
@@ -168,3 +168,40 @@ def test_scorer_finds_no_false_claim_when_the_model_quotes_every_excerpt(unit):
     findings = [f for f in check_claim_rules(answer, unit, token_counter=None)
                 if f.code != "claim_tokens_unchecked"]
     assert findings == []
+
+
+def test_quote_without_a_figure_is_not_cited():
+    """A figure-free verbatim quote can still be judged content-free by the scorer."""
+    words = "The passage discusses the evidence in general terms only."
+    claims = build_claims([item(words)], [chunk(words + " " + TEXT)], TASK, "one", OWNERS)
+    assert claims == [task_row_claim(TASK, "one")]
+
+
+def test_non_ascii_text_is_trimmed_by_weighted_length():
+    text = "Yield 4.25 percent " + "\u2014\u00e9 " * 300
+    trimmed = trim_quote(text)
+    assert text.startswith(trimmed)
+    assert len(trimmed) + 2 * sum(ord(c) > 127 for c in trimmed) <= MAX_CLAIM_CHARS
+
+
+def test_shared_document_with_null_entity_ids_is_citable(tmp_path):
+    owners = load_ownership(write_manifest(tmp_path, [
+        {"path": "corpus/S.json", "shared": True, "entity_ids": None}]))
+    assert may_cite(owners, "S", "anyone")
+
+
+def test_non_corpus_roles_and_paths_are_ignored(tmp_path):
+    owners = load_ownership(write_manifest(tmp_path, [
+        {"path": "corpus/R.json", "role": "reference", "entity_ids": ["x"]},
+        {"path": "other/O.json", "entity_ids": ["x"]}]))
+    assert not may_cite(owners, "R", "x") and not may_cite(owners, "O", "x")
+
+
+def test_document_whose_internal_id_differs_from_its_file_name_is_not_citable(tmp_path):
+    """Its offsets would be read against a different file by the scorer."""
+    write_manifest(tmp_path, [{"path": "corpus/A.json", "entity_ids": ["x"]},
+                              {"path": "corpus/B.json", "entity_ids": ["x"]}])
+    (tmp_path / "A.json").write_text(json.dumps({"doc_id": "B", "text": "alpha"}))
+    (tmp_path / "B.json").write_text(json.dumps({"doc_id": "B", "text": "beta"}))
+    owners = load_ownership(tmp_path)
+    assert not may_cite(owners, "A", "x") and may_cite(owners, "B", "x")
