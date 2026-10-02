@@ -21,7 +21,6 @@ MAX_REVIEW_PROMPT_CHARS = 20_000
 MAX_ROSTER = 20
 MAX_UPDATES = 4
 EXCERPT_CHARS = 400
-_META_CHARS = 300
 _SKIP_FIELDS = ("corpus_ref",)
 
 
@@ -55,9 +54,16 @@ def _excerpt(text: str) -> str:
     return text[: cut if cut > 0 else EXCERPT_CHARS].strip()
 
 
+def _unit(task: dict, entity: dict) -> str:
+    try:
+        return str(target_contract(task, entity)["output_unit"])
+    except Exception:  # noqa: BLE001 - a missing contract must not drop the review prompt.
+        return "task-defined"
+
+
 def build_review_prompt(task: dict, predictions: list[dict], contexts: list[list],
                         owners: Ownership | None) -> str | None:
-    """The whole-roster review request, or None when the roster cannot be reviewed safely."""
+    """The whole-roster review request, or None when it cannot be built safely within the cap."""
     if not _roster_matches(task, predictions):
         return None
     target = task.get("target") or {}
@@ -65,21 +71,22 @@ def build_review_prompt(task: dict, predictions: list[dict], contexts: list[list
     head = [
         "ROSTER REVIEW REQUEST. All forecasts for this task are listed together below.",
         f"TASK: {task.get('prompt', '')}",
-        f"TARGET: {target.get('name', '')} ({target.get('type', '')})"
-        + (f"; ALLOWED LABELS: {', '.join(target.get('labels') or [])}" if classification else ""),
-        f"CUTOFF DATE: {task.get('cutoff_date', '')}; INTERVAL LEVEL: {task.get('interval_level', 0.9)}",
-        "SUBMITTED FORECASTS:",
+        "FULL TARGET SPECIFICATION: " + json.dumps(target, ensure_ascii=False),
+        f"CUTOFF DATE: {task.get('cutoff_date', '')}; RESOLUTION DATE: {task.get('resolution_date', '')}; "
+        f"INTERVAL LEVEL: {task.get('interval_level', 0.9)}",
+        "SUBMITTED FORECASTS (entity metadata complete; output_unit from the target contract):",
     ]
     for entity, row in zip(task["entities"], predictions):
-        meta = json.dumps({k: v for k, v in entity.items() if k not in _SKIP_FIELDS},
-                          ensure_ascii=False)[:_META_CHARS]
-        head.append(f"- {entity['entity_id']}: {_answer(row, classification)} | {meta}")
+        meta = json.dumps({k: v for k, v in entity.items() if k not in _SKIP_FIELDS}, ensure_ascii=False)
+        head.append(f"- {entity['entity_id']}: {_answer(row, classification)} | "
+                    f"output_unit={_unit(task, entity)} | {meta}")
     tail = [
         "",
+        'Reply format for THIS request: {"updates": [...]}, not the prediction format.',
         "Check the forecasts against each other: relative ordering and magnitudes, consistency",
         "across related entities, and a plausible share of each label across the roster. Change",
         f"at most {MAX_UPDATES} entities, only where the evidence clearly supports it. A new",
-        "point_forecast must stay inside that entity's listed interval"
+        "point_forecast must stay inside that entity's listed interval and use its output_unit"
         + ("; a new label must be one of the allowed labels" if classification else "")
         + ". Do not change intervals. Return ONE JSON object only:",
         '{"updates": [{"entity_id": "...", '
@@ -87,10 +94,15 @@ def build_review_prompt(task: dict, predictions: list[dict], contexts: list[list
         + '"point_forecast": number}]}',
         'Return {"updates": []} if no change is clearly better.',
     ]
-    budget = MAX_REVIEW_PROMPT_CHARS - sum(len(x) + 1 for x in head + tail) - 20
-    if budget < 0:
+
+    def render(excerpts: list[str]) -> str:
+        block = ["CITABLE EXCERPTS (pre-cutoff, own or shared documents):", *excerpts] if excerpts else []
+        return "\n".join(head + block + tail)
+
+    if len(render([])) > MAX_REVIEW_PROMPT_CHARS:
         return None
-    lines, seen = ["CITABLE EXCERPTS (pre-cutoff, own or shared documents):"], set()
+    excerpts: list[str] = []
+    seen = set()
     for entity, chunks in zip(task["entities"], contexts or []):
         for chunk in chunks or []:
             doc_id = getattr(chunk, "doc_id", None)
@@ -100,13 +112,12 @@ def build_review_prompt(task: dict, predictions: list[dict], contexts: list[list
             if key in seen:
                 continue
             line = f"[{entity['entity_id']} | {doc_id}] {_excerpt(chunk.text)}"
-            if len(line) + 1 > budget:
-                continue
-            seen.add(key)
-            lines.append(line)
-            budget -= len(line) + 1
+            if len(render(excerpts + [line])) <= MAX_REVIEW_PROMPT_CHARS:
+                seen.add(key)
+                excerpts.append(line)
             break  # One excerpt per entity keeps the prompt short.
-    return "\n".join(head + (lines if len(lines) > 1 else []) + tail)
+    prompt = render(excerpts)
+    return prompt if len(prompt) <= MAX_REVIEW_PROMPT_CHARS else None
 
 
 def _finite(value: object) -> float | None:

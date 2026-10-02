@@ -126,3 +126,34 @@ def test_public_units_get_a_bounded_prompt_with_the_whole_roster(tmp_path, unit)
     assert prompt is not None and len(prompt) <= MAX_REVIEW_PROMPT_CHARS
     assert all(e["entity_id"] in prompt for e in task["entities"])
     assert apply_review(updates(), task, answer["entity_predictions"]) == answer["entity_predictions"]
+
+
+def test_prompt_carries_resolution_date_full_target_and_output_units():
+    task = dict(REG, resolution_date="2024-11-26",
+                target={"name": "net_change_pct_oi", "type": "ranking", "unit": "pct_of_open_interest"})
+    prompt = build_review_prompt(task, ROWS, CONTEXTS, OWNERS)
+    assert "2024-11-26" in prompt
+    assert json.dumps(task["target"], ensure_ascii=False) in prompt
+    assert prompt.count("output_unit=") == len(ROWS)
+
+
+def test_entity_metadata_is_kept_intact_not_sliced():
+    long_field = "five-week window from the October 22 report to the November 26 report; " * 6
+    task = dict(REG, entities=[dict(REG["entities"][0], window=long_field), *REG["entities"][1:]])
+    prompt = build_review_prompt(task, ROWS, CONTEXTS, OWNERS)
+    assert json.dumps(long_field, ensure_ascii=False) in prompt
+
+
+def test_prompt_states_its_own_reply_format_over_any_system_format():
+    prompt = build_review_prompt(REG, ROWS, CONTEXTS, OWNERS)
+    assert "not the prediction format" in prompt
+
+
+def test_cap_counts_every_character_and_refuses_an_oversized_head():
+    huge = {"entity_id": "A", "name": "x" * (MAX_REVIEW_PROMPT_CHARS + 10)}
+    task = dict(REG, entities=[huge, *REG["entities"][1:]])
+    assert build_review_prompt(task, ROWS, CONTEXTS, OWNERS) is None
+    long = "word 12 " * 3000
+    contexts = [[Chunk("own_a", "2024-10-25", 0, len(long), long)]] * 3
+    owners = {"own_a": (frozenset({"A", "B", "C"}), False)}
+    assert len(build_review_prompt(REG, ROWS, contexts, owners)) <= MAX_REVIEW_PROMPT_CHARS
