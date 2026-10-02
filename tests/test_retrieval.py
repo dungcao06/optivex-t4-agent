@@ -478,3 +478,139 @@ def test_malformed_pipe_runs_do_not_trigger_table_preservation(table):
 def test_plain_text_keeps_existing_overlap_windows():
     """Catches a table-only fix altering ordinary hard-window traversal."""
     assert list(retrieval_module()._passages("x" * 5000)) == [(0, 2200), (2000, 4200), (4000, 5000)]
+
+
+@pytest.mark.parametrize("metric", ["EPS growth", "change in diluted earnings per share"])
+@pytest.mark.parametrize("baseline", [
+    "Consolidated income statement. Earnings per share—basic $8.41 $7.32. "
+    "Earnings per share—assuming dilution $8.39 $7.30.",
+    "Net income of $1.7 billion, or $8.39 per diluted common share, "
+    "for the quarter, compared to $7.30 per diluted common share.",
+    "Earnings/(loss) per share of common stock: Assuming dilution: "
+    "Continuing operations $8.40 $7.32 Discontinued operations (0.01) (0.02) "
+    "Total $8.39 $7.30 Basic: Total $8.41 $7.32.",
+])
+def test_numeric_complement_preserves_drivers_and_eligible_exact_spans(tmp_path, metric, baseline):
+    """Catches lexical driver matches crowding out an issuer's absolute EPS."""
+    mod = retrieval_module()
+    for i in range(10):
+        write_doc(tmp_path, f"driver{i}",
+                  f"Outlook guidance margins revenue credit provisions {metric}. "
+                  + f"Operational factor{i} improved. " * 70, cik="55")
+    write_doc(tmp_path, "baseline", "Résumé — " + baseline, cik="55")
+    write_doc(tmp_path, "future", baseline, cik="55", doc_date="2024-02-01")
+    write_doc(tmp_path, "peer", baseline, cik="66")
+    write_doc(tmp_path, "cover", "Earnings Per Share 74. Securities registration 2024.", cik="55")
+    corpus = mod.build_index(tmp_path)
+    selected = mod.EvidenceIndex(corpus, "2024-01-31").retrieve(
+        {"target": {"name": "unseen_measure"}, "prompt": f"Forecast {metric} from outlook guidance margins revenue credit provisions."},
+        {"entity_id": "RENAMED", "cik": "55"}, top_k=4,
+    )
+    assert "baseline" in {c.doc_id for c in selected}
+    assert sum(c.doc_id.startswith("driver") for c in selected) == 3
+    assert not {"future", "peer", "cover"} & {c.doc_id for c in selected}
+    assert len(selected) <= 4 and sum(len(c.text) for c in selected) <= 16000
+    assert all(c.text == corpus.doc_texts[c.doc_id][c.span_start:c.span_end] for c in selected)
+
+
+@pytest.mark.parametrize("unit_name, entity_id, anchor, driver_start", [
+    ("t4-eps-yoy-2023Q2-mixed", "HON", "2.07", 91841),
+    ("t4-eps-yoy-2023Q2-mixed", "IBM", "1.01", 129188),
+    ("t4-eps-growth-2024Q3-banks", "PNC", "3.39", 27958),
+])
+def test_public_eps_complement_restores_absolute_baselines(unit_name, entity_id, anchor, driver_start):
+    """Catches the three audited baseline omissions while retaining useful drivers."""
+    mod = retrieval_module()
+    unit = UPSTREAM / "units" / unit_name
+    task = json.loads((unit / "task.json").read_text())
+    entity = next(e for e in task["entities"] if e["entity_id"] == entity_id)
+    corpus = mod.build_index(unit / "corpus")
+    selected = mod.EvidenceIndex(corpus, task["cutoff_date"]).retrieve(task, entity)
+    assert any(anchor in c.text and ("Earnings" in c.text or "per diluted common share" in c.text
+                                    or "Consolidated earnings" in c.text) for c in selected)
+    assert any(c.span_start == driver_start for c in selected)
+    assert len(selected) <= 8 and sum(len(c.text) for c in selected) <= 16000
+    assert all(len(c.text) <= 2200 and c.text == corpus.doc_texts[c.doc_id][c.span_start:c.span_end]
+               for c in selected)
+
+
+@pytest.mark.parametrize("top_k", [0, 1, 2, 8])
+def test_complement_respects_small_slot_limits_and_avoids_duplicate_baselines(tmp_path, top_k):
+    """Catches a reserved baseline exceeding top_k or evicting every driver."""
+    mod = retrieval_module()
+    write_doc(tmp_path, "driver", "EPS outlook guidance revenue margins " * 40, cik="55")
+    write_doc(tmp_path, "baseline", "Earnings per share basic $4.22 diluted $4.20.", cik="55")
+    selected = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31").retrieve(
+        {"target": {"name": "eps"}, "prompt": "EPS outlook guidance revenue margins"},
+        {"cik": "55"}, top_k=top_k,
+    )
+    assert len(selected) <= top_k
+    assert len({(c.doc_id, c.span_start, c.span_end) for c in selected}) == len(selected)
+    if top_k:
+        assert selected[0].doc_id == "driver"
+    if top_k > 1:
+        assert {c.doc_id for c in selected} == {"driver", "baseline"}
+
+
+@pytest.mark.parametrize("target", ["yield_change", "credit_event"])
+def test_eps_baseline_does_not_displace_unrelated_target_evidence(tmp_path, target):
+    """Catches unconditional numeric expansion changing non-EPS tasks."""
+    mod = retrieval_module()
+    for i in range(3):
+        write_doc(tmp_path, f"driver{i}", f"{target} liquidity outlook factor{i} " * 30, cik="55")
+    write_doc(tmp_path, "baseline", "Earnings per share basic $4.22 diluted $4.20.", cik="55")
+    selected = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31").retrieve(
+        {"target": {"name": target}}, {"cik": "55"}, top_k=2,
+    )
+    assert all(c.doc_id.startswith("driver") for c in selected)
+
+
+@pytest.mark.parametrize("decoy", [
+    "Adjusted earnings per share basic $9.30 diluted $9.20.",
+    "Earnings per share assuming dilution increased due to segment profit, "
+    "which impacted earnings per share by $0.40. Total impact $0.50.",
+    "Earnings Per Share 74. Consolidated statements 2024. Basic and diluted.",
+])
+def test_complement_does_not_reserve_slot_for_adjustments_deltas_or_contents(tmp_path, decoy):
+    """Catches treating EPS drivers or filing page numbers as absolute baselines."""
+    mod = retrieval_module()
+    for i in range(3):
+        write_doc(tmp_path, f"driver{i}", f"EPS outlook guidance revenue margins factor{i} " * 30, cik="55")
+    write_doc(tmp_path, "decoy", decoy, cik="55")
+    selected = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31").retrieve(
+        {"target": {"name": "eps"}, "prompt": "EPS outlook guidance revenue margins"},
+        {"cik": "55"}, top_k=2,
+    )
+    assert all(c.doc_id.startswith("driver") for c in selected)
+
+
+def test_existing_absolute_eps_evidence_does_not_cost_an_extra_driver_slot(tmp_path):
+    """Catches adding a redundant baseline when the driver ranking already has one."""
+    mod = retrieval_module()
+    write_doc(tmp_path, "selected", "EPS outlook guidance revenue margins. "
+              "Net income $1.2 billion or $4.20 per diluted common share.", cik="55")
+    write_doc(tmp_path, "driver", "EPS outlook guidance revenue margins improved.", cik="55")
+    write_doc(tmp_path, "redundant", "Earnings per share basic $4.22 diluted $4.20 Total $4.20.", cik="55")
+    selected = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31").retrieve(
+        {"target": {"name": "eps"}, "prompt": "EPS outlook guidance revenue margins"},
+        {"cik": "55"}, top_k=2,
+    )
+    assert {c.doc_id for c in selected} == {"selected", "driver"}
+
+
+@pytest.mark.parametrize("baseline", [
+    "GAAP diluted EPS was $8.39 versus $7.30 in the prior quarter.",
+    "Diluted earnings per share $8.39 $7.30.",
+])
+def test_explicit_diluted_eps_levels_need_no_basic_share_row(tmp_path, baseline):
+    """Catches missing standalone reported levels without a basic/diluted table."""
+    mod = retrieval_module()
+    for i in range(3):
+        write_doc(tmp_path, f"driver{i}", f"EPS outlook revenue guidance factor{i}. " * 35, cik="55")
+    write_doc(tmp_path, "baseline", baseline, cik="55")
+    selected = mod.EvidenceIndex(mod.build_index(tmp_path), "2024-01-31").retrieve(
+        {"target": {"name": "eps"}, "prompt": "EPS outlook revenue guidance"},
+        {"cik": "55"}, top_k=2,
+    )
+    assert selected[0].doc_id.startswith("driver")
+    assert selected[1].doc_id == "baseline"
