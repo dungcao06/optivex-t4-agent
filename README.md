@@ -132,3 +132,29 @@ Only reasons that match the final prediction, original evidence and pinned deter
 guardrails are submitted; otherwise the optional block is omitted. Premises containing
 deny-list terms are conservatively omitted. This verifies structure and provenance, not
 reasoning quality. Reasoning is evaluated separately on Final units, not Development.
+
+## Numerical history context experiment
+
+Starting from the best completed contract candidate (`2b8b222`, observed score 0.4025),
+this candidate adds up to 1,200 characters of deterministic table summaries to each
+entity prompt. Claude implemented the parser and initial tests; Codex integrated and
+reviewed it. Only selected, manifest-authorized own/shared frozen documents are parsed.
+Date-indexed rows yield the latest value, change since the previous available observation,
+and median of up to six observations. Vintage grids keep the explicitly named reference
+period fixed and summarize eligible vintage columns. Dates must be valid and no later
+than both document date and task cutoff. Ambiguous chronology, nonfinite arithmetic,
+unsupported tables and excessive inputs are omitted.
+
+Records retain exact raw-cell offsets; the prompt shows their source envelope and column
+name. The parser may read portions of a selected document outside retrieved excerpts.
+These computed descriptions are explicitly non-citable context: claims and reasons still
+must resolve to original retrieved quotations. Changes retain column units and are not
+automatically converted to target units. Derived values display up to 12 significant digits;
+raw latest values remain verbatim. Entity-matching columns are prioritized within the cap.
+
+The runtime omits the whole optional block on error and records its error count. It adds no
+model calls or forecast override, and keeps the existing retrieval, prediction validation,
+intervals, reasons, call budget and output schema. Prompt changes can still help or hurt
+forecasts. Local coverage is 46/78 public entities; arithmetic/provenance and HTTP tests do
+not measure House-model accuracy. The 42-fold auction replay is a local cross-check against
+an adjacent research artifact and is skipped in CI when that artifact is absent.

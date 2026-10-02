@@ -22,6 +22,7 @@ from reasons import build_reasons
 from targets import validate_target
 from fallback import fallback_prediction
 from retrieval import EvidenceIndex, build_index
+from history import build_history, format_history
 
 REQUEST_LIMIT = 25
 BATCH_MARKER = "BATCH REQUESTS JSON:\n"
@@ -164,8 +165,20 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
     entities = task["entities"]
     contexts = [index.retrieve(task, entity, top_k=8) for entity in entities]
     owners = load_ownership(corpus_dir)
-    prompts = [prompt_builder(task, entity, context) + citable_note(owners, entity["entity_id"], context)
-               for entity, context in zip(entities, contexts)]
+    prompts = []
+    history_errors = 0
+    for entity, context in zip(entities, contexts):
+        prompt = prompt_builder(task, entity, context)
+        try:
+            block = format_history(build_history(task, entity, corpus, owners, context), limit=1200)
+            if not isinstance(block, str) or len(block) > 1200:
+                raise ValueError("Invalid bounded history context")
+            prompt += block
+        except Exception:
+            # Descriptive statistics are optional context, never a reason to
+            # discard usable evidence or skip the entity's primary prediction.
+            history_errors += 1
+        prompts.append(prompt + citable_note(owners, entity["entity_id"], context))
     client = BudgetedClient(system, started + 520, mock)
     predictions = [None] * len(entities)
     errors = {}
@@ -232,6 +245,8 @@ def run(task_path: Path, corpus_dir: Path, out_path: Path, system: str, prompt_b
             predictions[i] = fallback_prediction(task, entities[i], peers, [claim] if claim else [])
     notes = {"agent": "optivex-evidence-council", "retrieval": "bounded-target-aware-passages",
              "model_requests": client.requests, "degraded_entities": len(degraded_ids), "mock": mock}
+    if history_errors:
+        notes["history_context_errors"] = history_errors
     if degraded_ids:
         notes.update(fallback_quality="unverified", degraded_entity_ids=degraded_ids,
                      quality_warning="Inference failed for these entities. Their forecasts are the median of this unit's successful rows and cite only the entity's task row; they are not evidence of predictive quality.",

@@ -215,3 +215,28 @@ def test_large_values_are_printed_without_exponents():
     text = "date | open_interest\n" + "".join(f"2024-0{m}-01 | {1_400_000 + m * 10_001:,}\n" for m in range(1, 8))
     block = format_history(build_history(TASK, {"entity_id": "E"}, Corpus({"own": text}), OWN, chunks("own")))
     assert "e+" not in block and "median of last 6 = 1445004.5" in block
+
+
+@pytest.mark.parametrize("family", ["cpicomp", "fomc-curve-20240918"])
+def test_each_public_shared_table_entity_keeps_its_own_column_in_formatted_block(family):
+    from retrieval import EvidenceIndex, build_index
+    unit = next(u for u in UNITS if family in u.name)
+    task = json.loads((unit / "task.json").read_text())
+    corpus, owners = build_index(unit / "corpus"), load_ownership(unit / "corpus")
+    index = EvidenceIndex(corpus, task["cutoff_date"])
+    for entity in task["entities"]:
+        expected = entity["name"] if family == "cpicomp" else entity["series_fred"]
+        records = build_history(task, entity, corpus, owners, index.retrieve(task, entity))
+        assert records and records[0].column.casefold() == expected.casefold()
+        assert f"| {records[0].column} |" in format_history(records)
+
+
+def test_cot_formatted_blocks_preserve_the_observed_numerator_and_denominator():
+    from retrieval import EvidenceIndex, build_index
+    unit = next(u for u in UNITS if "cotpos" in u.name)
+    task = json.loads((unit / "task.json").read_text())
+    corpus, owners = build_index(unit / "corpus"), load_ownership(unit / "corpus")
+    index = EvidenceIndex(corpus, task["cutoff_date"])
+    for entity in task["entities"]:
+        block = format_history(build_history(task, entity, corpus, owners, index.retrieve(task, entity)))
+        assert "| open_interest |" in block and "| noncomm_net |" in block

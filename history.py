@@ -10,9 +10,12 @@ oversized or dated after the cutoff is omitted rather than guessed.
 """
 from __future__ import annotations
 
+import math
 import re
 import statistics
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 
 from claims import Ownership, may_cite
 
@@ -111,16 +114,37 @@ def _tables(text: str):
 
 
 def _number(text: str) -> float | None:
-    return float(text.replace(",", "")) if _NUMBER.fullmatch(text) else None
+    value = float(text.replace(",", "")) if _NUMBER.fullmatch(text) else None
+    return value if value is not None and math.isfinite(value) else None
+
+
+def _valid_period(text: str) -> bool:
+    if not _PERIOD.fullmatch(text):
+        return False
+    try:
+        date.fromisoformat(text + "-01" if len(text) == 7 else text)
+        return True
+    except ValueError:
+        return False
+
+
+def _finite_record(record: HistoryRecord) -> bool:
+    return (math.isfinite(record.median) and
+            (record.last_change is None or math.isfinite(record.last_change)))
 
 
 def _row_records(doc_id: str, header, rows, limit: str) -> list[HistoryRecord]:
-    if not all(_PERIOD.fullmatch(r[0][0]) for r in rows):
+    periods = [r[0][0] for r in rows]
+    if (not all(_valid_period(p) for p in periods) or len(set(periods)) != len(periods)
+            or len({len(p) for p in periods}) != 1):
         return []
     records = []
     for column in range(1, len(header)):
         cells, numeric = [], True
         for row in rows:
+            period = row[0][0]
+            if period > limit[: len(period)]:
+                continue
             text, start, end = row[column]
             if text.lower() in MISSING:
                 continue
@@ -128,33 +152,49 @@ def _row_records(doc_id: str, header, rows, limit: str) -> list[HistoryRecord]:
             if value is None:
                 numeric = False
                 break
-            period = row[0][0]
-            if period <= limit[: len(period)]:
-                cells.append(Cell(period, value, text, start, end))
+            cells.append(Cell(period, value, text, start, end))
         cells.sort(key=lambda cell: cell.period)
         if numeric and cells:
-            records.append(HistoryRecord(doc_id, header[column][0], "", "rows", tuple(cells)))
+            record = HistoryRecord(doc_id, header[column][0], "", "rows", tuple(cells))
+            if _finite_record(record):
+                records.append(record)
     return records
 
 
 def _vintage_records(doc_id: str, header, rows, limit: str, entity: dict) -> list[HistoryRecord]:
+    dates_by_column = [_DATE.findall(h[0]) for h in header[1:]]
+    if any(len(dates) != 1 or not _valid_period(dates[0]) for dates in dates_by_column):
+        return []
+    dates = [d[0] for d in dates_by_column]
+    if len(set(dates)) != len(dates):
+        return []
     labels = {row[0][0] for row in rows}
     named = {v for v in entity.values() if isinstance(v, str) and v in labels}
     if len(named) != 1:
         return []
     label = named.pop()
+    if not _valid_period(label) or label > limit[:len(label)]:
+        return []
     matching = [row for row in rows if row[0][0] == label]
     if len(matching) != 1:
         return []
     cells = []
     for column in range(1, len(header)):
-        dates = _DATE.findall(header[column][0])
+        period = dates[column - 1]
+        if period > limit or period[:len(label)] < label:
+            continue
         text, start, end = matching[0][column]
-        value = None if text.lower() in MISSING else _number(text)
-        if len(dates) == 1 and dates[0] <= limit and value is not None:
-            cells.append(Cell(dates[0], value, text, start, end))
+        if text.lower() in MISSING:
+            continue
+        value = _number(text)
+        if value is None:
+            return []
+        cells.append(Cell(period, value, text, start, end))
     cells.sort(key=lambda cell: cell.period)
-    return [HistoryRecord(doc_id, "value", label, "vintages", tuple(cells))] if cells else []
+    if not cells:
+        return []
+    record = HistoryRecord(doc_id, "value", label, "vintages", tuple(cells))
+    return [record] if _finite_record(record) else []
 
 
 def _relevance(record: HistoryRecord, task: dict, entity: dict) -> int:
@@ -175,7 +215,8 @@ def build_history(task: dict, entity: dict, corpus, owners: Ownership | None,
     """Structured records from selected own/shared pre-cutoff tables, most relevant first."""
     cutoff = task.get("cutoff_date")
     entity_id = entity.get("entity_id")
-    if not isinstance(cutoff, str) or not _DATE.fullmatch(cutoff) or not isinstance(entity_id, str):
+    if (not isinstance(cutoff, str) or len(cutoff) != 10 or not _valid_period(cutoff)
+            or not isinstance(entity_id, str)):
         return []
     selected = list(dict.fromkeys(getattr(c, "doc_id", None) for c in contexts or []))
     records: list[HistoryRecord] = []
@@ -185,14 +226,14 @@ def build_history(task: dict, entity: dict, corpus, owners: Ownership | None,
         text = corpus.doc_texts.get(doc_id)
         doc_date = corpus.doc_dates.get(doc_id)
         if (not isinstance(text, str) or len(text) > MAX_DOC_CHARS or not isinstance(doc_date, str)
-                or not _DATE.fullmatch(doc_date) or doc_date > cutoff):
+                or len(doc_date) != 10 or not _valid_period(doc_date) or doc_date > cutoff):
             continue
         limit = min(cutoff, doc_date)  # Rows dated after the document are schedules, not data.
         for header, rows in _tables(text):
-            dated = [h for h in header[1:] if len(_DATE.findall(h[0])) == 1]
-            if len(header) > 2 and len(dated) == len(header) - 1:
+            dated = [h for h in header[1:] if _DATE.search(h[0])]
+            if len(dated) == len(header) - 1:
                 records += _vintage_records(doc_id, header, rows, limit, entity)
-            else:
+            elif not dated:
                 records += _row_records(doc_id, header, rows, limit)
     order = {doc_id: i for i, doc_id in enumerate(selected)}
     ranked = sorted(enumerate(records),
@@ -202,25 +243,23 @@ def build_history(task: dict, entity: dict, corpus, owners: Ownership | None,
 
 def _fmt(value: float) -> str:
     """Plain decimals, never exponents, which models misread."""
-    if value == int(value) and abs(value) < 1e15:
-        return str(int(value))
-    if 1e-4 <= abs(value) < 1e5:
-        return format(value, ".6g")
-    return f"{value:.6f}".rstrip("0").rstrip(".")
+    return format(Decimal(format(value, ".12g")), "f")
 
 
 def format_history(records: list[HistoryRecord], limit: int = 1200) -> str:
     """A complete context block within `limit` characters; whole records are omitted, never cut."""
-    head = ("COMPUTED FROM FROZEN TABLES (deterministic, pre-cutoff own/shared documents; "
-            "context, not a forecast):\n")
+    head = ("COMPUTED FROM FROZEN TABLES (pre-cutoff own/shared documents; not a forecast). "
+            "Not citable quotes: claims must quote original excerpts. Changes use column units, "
+            "not necessarily target units; derived values rounded to 12 significant digits.\n")
     lines = []
     for record in records:
         scope = f" for {record.label}" if record.label else ""
-        line = (f"- {record.doc_id} | {record.column}{scope} | {record.cells[0].period}.."
+        span = f"{min(c.start for c in record.cells)}:{max(c.end for c in record.cells)}"
+        line = (f"- {record.doc_id}[{span}] | {record.column}{scope} | {record.cells[0].period}.."
                 f"{record.cells[-1].period}, n={len(record.cells)}: last {record.cells[-1].raw}"
                 f" ({record.cells[-1].period})")
         if record.last_change is not None:
-            line += f"; change vs previous {_fmt(record.last_change)}"
+            line += f"; change since {record.cells[-2].period} = {_fmt(record.last_change)}"
         line += f"; median of last {record.median_window} = {_fmt(record.median)}\n"
         if len(head) + sum(map(len, lines)) + len(line) <= limit:
             lines.append(line)
