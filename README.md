@@ -2,7 +2,7 @@
 
 This is Team `optivex`'s Agenthon 2026 Track 4 agent. It uses the official strong-RAG prompt and document types with a bounded participant runtime. Inference uses only the task table and frozen pre-cutoff corpus. Target-aware passages preserve original citation offsets; requests disable House-model thinking, obey a shared 25-call limit, and batch larger rosters. Malformed replies receive bounded repairs without aborting all entities.
 
-Exact quotation matching establishes provenance, not semantic entailment. If inference cannot recover, the agent marks placeholder forecasts and context-only citations as `notes.fallback_quality="unverified"`. These are not a competitive prediction or a guarantee of passing the faithfulness gate. A missing eligible corpus cannot be repaired by inventing evidence.
+Exact quotation matching establishes provenance, not semantic entailment. If inference cannot recover for an entity, its row takes the median forecast of the unit's successful rows, cites only the entity's task row and is marked `notes.fallback_quality="unverified"`. That is not a competitive prediction. A missing eligible corpus cannot be repaired by inventing evidence.
 
 ## Quantity-and-period prompt experiment
 
@@ -32,7 +32,7 @@ unchanged, though different passage boundaries can change retrieval rankings. Ge
 boundary tests and all six entities in the public rates fixture verify complete table
 retrieval, not improved prediction quality or leaderboard score.
 
-## Numeric identity and citation-context experiment
+## Numeric identity retrieval
 
 Retrieval preserves standalone unsigned hyphenated numeric terms, such as `2-Year`
 and `10-Year`, without discarding their distinguishing number. Supported dash variants
@@ -41,21 +41,24 @@ their fractional part. Ordinary number-word prose is not joined. Ambiguous numer
 tails fall back to existing tokens rather than being interpreted as a different
 identity. Original corpus text, citation offsets and evidence limits are unchanged.
 
-Final citations are deduplicated by document and source offsets, independently of claim
-wording. Original unique citations take priority within the existing four-citation cap.
-If space remains, at most one additional citation preserves contiguous table context
-from the recognized caption/header through the quoted row's end. Recognition uses the
-original document, not an excerpt that could be a clipped oversized table. The whole
-recognized table must be inside the model-visible excerpt; unavailable or invalid
-optional metadata leaves the original citation intact.
+## Scorer 5.2.2 claim policy
 
-Citation enrichment leaves submitted forecasts and intervals unchanged. The combined
-candidate keeps prompt templates and House-model request limits unchanged, but retrieval
-can change the evidence supplied to the model and therefore its predictions. Enrichment
-can add judge work because the verifier evaluates every citation; retaining original
-spans does not guarantee unchanged verifier latency or successful evaluation. Local
-tests establish retrieval/citation integrity and protocol compatibility, not semantic
-entailment, a doubled score or a leaderboard improvement.
+Track 4 scorer 5.2.2 (public main `ede7381`) pays nothing for a true claim and multiplies a
+unit's score by `1 - F / (F + min(T, 3E))` for false ones. A claim is false if it cites a
+document the manifest does not label for its entity (nor marks shared), carries a figure no
+cited span holds, exceeds 4,000 characters or 400 judge tokens, or is contradicted.
+
+Claims are therefore short verbatim quotes (at most 400 characters; the densest 400-character
+public window measured 280 judge tokens) from documents the read-only `corpus/manifest.json`
+labels for the entity or marks shared. Duplicate spans collapse and at most three claims are
+kept. If no model quote qualifies, the entity's own task-table row (`doc_id: "task"`) is
+quoted. Peer documents stay in the prompt as context; the prompt names the citable ones.
+The earlier table-context citation enrichment is retired.
+
+A malformed or ungrounded citation now drops only that citation and keeps a valid forecast.
+End-to-end tests run the scorer's own deterministic claim rules on every public unit. These
+checks establish claim validity, not forecast quality, contradiction-judge outcomes or a
+leaderboard gain.
 
 ## Local run
 
@@ -73,8 +76,8 @@ Without `--mock`, the official harness supplies `MODEL_ENDPOINT`, `MODEL_NAME`, 
 
 ## Container
 
-The Dockerfile is standalone. During the build it fetches only the official strong-RAG
-directory and MIT license at pinned commit `2b307560c8183905a030dcb4cd26ce857a039cfd`.
+The Dockerfile is standalone. During the build it fetches the official strong-RAG and citation guardrail
+directories and MIT license at pinned commit `ede7381d8c1ba9d8c84068f9d142f5e093a33892`.
 The Python base image and every write-capable GitHub Action are pinned by digest/commit.
 
 Build locally from this directory when a Docker engine is available:
@@ -114,3 +117,33 @@ to run the HTTP integration suite inside a locally built Docker image on Linux.
 ## Secrets
 
 Do not put the Agenthon Team Key, model token, registry credentials, or account credentials in this directory or image.
+
+## Target checks and grounded reasons
+
+The prompt declares task-derived output units, forecast period and permitted conversions.
+Optional arithmetic records are checked against task baselines and denominators; probability
+points and intervals must lie in [0, 1]. Retrieval can add one complementary absolute GAAP
+EPS baseline while retaining the leading driver passages and existing evidence limits.
+Fallbacks use compatible-unit peers, or [0, 1] for probabilities without peers. Other empty
+peer cases retain the legacy placeholder and are marked unverified.
+
+A successful first response may supply a grounded reason without an extra model request.
+Only reasons that match the final prediction, original evidence and pinned deterministic
+guardrails are submitted; otherwise the optional block is omitted. Premises containing
+deny-list terms are conservatively omitted. This verifies structure and provenance, not
+reasoning quality. Reasoning is evaluated separately on Final units, not Development.
+
+## Entity-context experiment
+
+This experiment starts from source `2b8b222` (Development submission 954948,
+0.4025). After normal retrieval, including EPS complementation, it removes
+explicitly peer-owned excerpts when the selection already contains an entity's
+own non-shared document. Ownership uses the same frozen manifest parser as claims.
+Selected own/shared passages keep their order and exact spans. Unknown or unlabelled
+documents remain available, and missing ownership or an absent own anchor preserves
+the existing selection. Removed slots are not refilled with weaker prose.
+
+The hypothesis is that unrelated numerical histories distract from the target
+series. The tradeoff is less cross-entity context, potentially relevant to ranking.
+No forecast prompt, validation, retry, request budget or fallback change is bundled
+with this experiment. Local retrieval and mock checks do not establish a score gain.

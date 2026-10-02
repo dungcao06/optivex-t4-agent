@@ -9,7 +9,7 @@ def test_prompt_enforces_evidence_and_embargo() -> None:
     assert "Do not use memory" in source
     assert "after the cutoff date" in source
     assert "copied verbatim" in source
-    assert "must support the label/value/ranking" in source
+    assert "Quote relevant observed facts" in source
 
 
 def test_container_declares_interface_and_verb() -> None:
@@ -36,6 +36,6 @@ def test_runtime_omits_optional_label_and_rank() -> None:
             {"label": None, "rank": -3, "point_forecast": 1,
              "interval": {"lo": 0, "hi": 2},
              "evidence": [{"doc_id": "doc", "quote": "Evidence", "claim": "Context"}]},
-            {"target": {"type": family}}, {"entity_id": "one"}, [chunk])
+            {"target": {"type": family}, "entities": [{"entity_id": "one"}]}, {"entity_id": "one"}, [chunk])
         assert "label" not in result
         assert "rank" not in result

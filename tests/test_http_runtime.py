@@ -86,9 +86,17 @@ def assert_answer(answer: dict, task: dict, unit: Path):
         else:
             assert "label" not in row or isinstance(row["label"], str)
         for claim in row["claims"]:
+            if claim["doc_id"] == "task":
+                continue  # Checked against the entity's own row by the scorer rules below.
             doc = corpus.doc_texts[claim["doc_id"]]
             assert 0 <= claim["span_start"] < claim["span_end"] <= len(doc)
             assert corpus.doc_dates[claim["doc_id"]] <= task["cutoff_date"]
+    # The scorer reads the unit's own (digest-checked) task.json, so only unmodified tasks apply.
+    if task == json.loads((unit / "task.json").read_text()):
+        from baselines.guardrails_example.citation_rail import check_claim_rules
+        findings = [f for f in check_claim_rules(answer, unit, token_counter=None)
+                    if f.code != "claim_tokens_unchecked"]
+        assert findings == [], findings
 
 
 def assert_request_contract(requests: list[dict]):
@@ -148,12 +156,20 @@ def test_ungrounded_quote_cannot_keep_its_claim(tmp_path):
     answer, requests = run_agent(tmp_path, EXAMPLE, "ungrounded")
     assert_answer(answer, json.loads((EXAMPLE / "task.json").read_text()), EXAMPLE)
     assert UNSUPPORTED_CLAIM not in json.dumps(answer)
-    assert answer["notes"]["degraded_entities"] == 1
-    assert answer["notes"]["fallback_quality"] == "unverified"
+    assert answer.get("notes", {}).get("degraded_entities", 0) == 0
+    assert [claim["doc_id"] for row in answer["entity_predictions"] for claim in row["claims"]] == ["task"]
     assert_request_contract(requests)
 
 
-@pytest.mark.parametrize("mode", ["invalid_envelope", "truncated_envelope", "interval_list", "doc_id_list"])
+def test_malformed_citation_keeps_the_forecast_and_cites_the_task_row(tmp_path):
+    answer, requests = run_agent(tmp_path, EXAMPLE, "doc_id_list")
+    assert_answer(answer, json.loads((EXAMPLE / "task.json").read_text()), EXAMPLE)
+    assert answer.get("notes", {}).get("degraded_entities", 0) == 0
+    assert [claim["doc_id"] for row in answer["entity_predictions"] for claim in row["claims"]] == ["task"]
+    assert_request_contract(requests)
+
+
+@pytest.mark.parametrize("mode", ["invalid_envelope", "truncated_envelope", "interval_list"])
 def test_invalid_envelope_or_field_shapes_write_degraded_output(tmp_path, mode):
     answer, requests = run_agent(tmp_path, EXAMPLE, mode)
     assert_answer(answer, json.loads((EXAMPLE / "task.json").read_text()), EXAMPLE)
@@ -196,3 +212,22 @@ def test_thirty_entities_fit_within_total_http_budget(tmp_path, mode):
         assert answer["notes"]["degraded_entities"] == 30
     else:
         assert answer.get("notes", {}).get("degraded_entities", 0) == 0
+
+
+def test_first_pass_reason_reaches_answer_without_extra_request(tmp_path, monkeypatch):
+    import http_fixture
+    original = http_fixture.prompt_reply
+    def with_reason(payload, mode):
+        raw = json.loads(original(payload, mode))
+        fact = raw['evidence'][0]
+        raw['reason'] = {'premise': fact['quote'], 'quote': fact['quote'], 'doc_id': fact['doc_id'],
+                         'mechanism': 'The observed revenue base informs expected earnings capacity.',
+                         'answer_implication': 'AAPL: label=' + raw['label']}
+        return json.dumps(raw)
+    monkeypatch.setattr(http_fixture, 'prompt_reply', with_reason)
+    answer, requests = run_agent(tmp_path, EXAMPLE)
+    assert len(requests) == 1
+    assert len(answer.get('submitted_reasons', [])) == 1
+    assert_answer(answer, json.loads((EXAMPLE/'task.json').read_text()), EXAMPLE)
+    from baselines.guardrails_example.citation_rail import check_submitted_reasons, load_corpus
+    assert check_submitted_reasons(answer,load_corpus(EXAMPLE/'corpus'), '2024-03-15') == []

@@ -17,6 +17,7 @@ from datetime import date
 from pathlib import Path
 
 from baselines.strong_rag_baseline.indexer import Chunk, IndexedCorpus
+from claims import Ownership, load_ownership
 
 _MAX_PASSAGE = 2200
 _MIN_BREAK = 1600
@@ -29,6 +30,7 @@ _NUMERIC_IDENTITY = re.compile(
     r"[^\S\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*([a-z]{2,})\b"
 )
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+_EPS = re.compile(r"\beps\b|earnings(?:/\(loss\))? per (?:common )?share|per diluted (?:common )?share", re.I)
 _STOP = frozenset(
     "a an and are as at be been before by can do each for from given in into is it "
     "its of on or per than that the their these they this through to using was were "
@@ -44,6 +46,7 @@ _STOP = frozenset(
 @dataclass(frozen=True)
 class _IndexedEvidence(IndexedCorpus):
     doc_metadata: dict[str, dict] = field(default_factory=dict)
+    ownership: Ownership | None = None
 
 
 def _valid_date(value: object) -> date | None:
@@ -178,7 +181,7 @@ def build_index(corpus_dir: str | Path) -> IndexedCorpus:
         for start, end in _passages(text):
             if text[start:end].strip():
                 chunks.append(Chunk(doc_id, doc_date, start, end, text[start:end]))
-    return _IndexedEvidence(chunks, doc_texts, doc_dates, metadata)
+    return _IndexedEvidence(chunks, doc_texts, doc_dates, metadata, load_ownership(root))
 
 
 def _tokens(value: object) -> list[str]:
@@ -213,6 +216,28 @@ def _cik(value: object) -> str | None:
     return str(int(text)) if text.isdigit() else None
 
 
+def _eps_baseline_score(text: str) -> int:
+    """Recognize absolute EPS tables/prose, not contribution deltas or contents."""
+    text = re.sub(r"\s+", " ", text.replace("\u200b", " ")).lower()
+    best = 0
+    for match in _EPS.finditer(text):
+        local = text[max(0, match.start() - 90):match.end() + 280]
+        if not re.search(r"\d+\.\d+", local):
+            continue
+        if re.search(r"non.gaap|adjusted|impacted|impact of|increased due", local):
+            continue
+        diluted = bool(re.search(r"dilut", local))
+        table = diluted and "basic" in local
+        total = diluted and bool(re.search(r"\btotal\b|consolidated earnings", local))
+        income = "net income" in local and "per diluted" in local
+        direct = ("diluted" in text[max(0, match.start() - 30):match.start()]
+                  and bool(re.match(r"\s*(?:(?:was|were|of)\s+)?\$\s*\(?-?\d+\.\d+",
+                                    text[match.end():])))
+        if table or total or income or direct:
+            best = max(best, 1 + 2 * table + 3 * total + income)
+    return best
+
+
 class EvidenceIndex:
     """BM25 retrieval with issuer affinity, source diversity and a hard size cap."""
 
@@ -228,7 +253,10 @@ class EvidenceIndex:
         ]
         self._lengths: list[int] = []
         self._postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        self._eps_baselines: list[tuple[int, int]] = []
         for index, chunk in enumerate(self.chunks):
+            if baseline_score := _eps_baseline_score(chunk.text):
+                self._eps_baselines.append((baseline_score, index))
             counts = Counter(_tokens(chunk.text))
             self._lengths.append(sum(counts.values()))
             for token, count in counts.items():
@@ -379,4 +407,47 @@ class EvidenceIndex:
             selected_tokens.append(tokens)
             doc_counts[chunk.doc_id] += 1
             used += len(chunk.text)
+        # Complement the driver ranking with at most one absolute target-value
+        # passage. Do not expand the lexical query or disturb the leading drivers.
+        # Recognition is metric-based, independent of task/entity identifiers.
+        target_text = json.dumps(target, ensure_ascii=False) + " " + str(task.get("prompt", ""))
+        if (top_k > 1 and _EPS.search(target_text.replace("_", " "))
+                and not any(_eps_baseline_score(c.text) for c in selected)):
+            baselines = [
+                (score * affinities[self.chunks[index].doc_id], index)
+                for score, index in self._eps_baselines
+                if self.chunks[index].doc_id not in excluded
+                and (not issuer_matches or self.chunks[index].doc_id in issuer_matches)
+            ]
+            baselines.sort(key=lambda item: (-item[0], self.chunks[item[1]].doc_id,
+                                             self.chunks[item[1]].span_start))
+            if baselines:
+                complement = self.chunks[baselines[0][1]]
+                # Existing coverage (including overlapping windows) needs no slot.
+                covered = any(
+                    c.text == complement.text or (
+                        c.doc_id == complement.doc_id
+                        and min(c.span_end, complement.span_end) - max(c.span_start, complement.span_start)
+                        > min(len(c.text), len(complement.text)) / 3
+                    ) for c in selected
+                )
+                if not covered:
+                    keep = list(selected)
+                    remaining = used
+                    while keep and (len(keep) >= top_k or remaining + len(complement.text) > _EVIDENCE_BUDGET):
+                        remaining -= len(keep.pop().text)
+                    if keep and remaining + len(complement.text) <= _EVIDENCE_BUDGET:
+                        selected = keep + [complement]
+        # Once an own-series anchor is present, omit explicitly peer-owned
+        # excerpts. Keep selected shared/unknown context and original ordering;
+        # do not refill with weaker passages simply to consume the budget.
+        owners = getattr(self.corpus, "ownership", None) or {}
+        entity_id = entity.get("entity_id")
+        if any(entity_id in owners[c.doc_id][0] and not owners[c.doc_id][1]
+               for c in selected if c.doc_id in owners):
+            selected = [
+                c for c in selected
+                if c.doc_id not in owners or not owners[c.doc_id][0]
+                or owners[c.doc_id][1] or entity_id in owners[c.doc_id][0]
+            ]
         return selected
