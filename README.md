@@ -132,3 +132,18 @@ Only reasons that match the final prediction, original evidence and pinned deter
 guardrails are submitted; otherwise the optional block is omitted. Premises containing
 deny-list terms are conservatively omitted. This verifies structure and provenance, not
 reasoning quality. Reasoning is evaluated separately on Final units, not Development.
+
+## Entity-context experiment
+
+This experiment starts from source `2b8b222` (Development submission 954948,
+0.4025). After normal retrieval, including EPS complementation, it removes
+explicitly peer-owned excerpts when the selection already contains an entity's
+own non-shared document. Ownership uses the same frozen manifest parser as claims.
+Selected own/shared passages keep their order and exact spans. Unknown or unlabelled
+documents remain available, and missing ownership or an absent own anchor preserves
+the existing selection. Removed slots are not refilled with weaker prose.
+
+The hypothesis is that unrelated numerical histories distract from the target
+series. The tradeoff is less cross-entity context, potentially relevant to ranking.
+No forecast prompt, validation, retry, request budget or fallback change is bundled
+with this experiment. Local retrieval and mock checks do not establish a score gain.

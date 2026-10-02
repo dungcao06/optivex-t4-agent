@@ -17,6 +17,7 @@ from datetime import date
 from pathlib import Path
 
 from baselines.strong_rag_baseline.indexer import Chunk, IndexedCorpus
+from claims import Ownership, load_ownership
 
 _MAX_PASSAGE = 2200
 _MIN_BREAK = 1600
@@ -45,6 +46,7 @@ _STOP = frozenset(
 @dataclass(frozen=True)
 class _IndexedEvidence(IndexedCorpus):
     doc_metadata: dict[str, dict] = field(default_factory=dict)
+    ownership: Ownership | None = None
 
 
 def _valid_date(value: object) -> date | None:
@@ -179,7 +181,7 @@ def build_index(corpus_dir: str | Path) -> IndexedCorpus:
         for start, end in _passages(text):
             if text[start:end].strip():
                 chunks.append(Chunk(doc_id, doc_date, start, end, text[start:end]))
-    return _IndexedEvidence(chunks, doc_texts, doc_dates, metadata)
+    return _IndexedEvidence(chunks, doc_texts, doc_dates, metadata, load_ownership(root))
 
 
 def _tokens(value: object) -> list[str]:
@@ -436,4 +438,16 @@ class EvidenceIndex:
                         remaining -= len(keep.pop().text)
                     if keep and remaining + len(complement.text) <= _EVIDENCE_BUDGET:
                         selected = keep + [complement]
+        # Once an own-series anchor is present, omit explicitly peer-owned
+        # excerpts. Keep selected shared/unknown context and original ordering;
+        # do not refill with weaker passages simply to consume the budget.
+        owners = getattr(self.corpus, "ownership", None) or {}
+        entity_id = entity.get("entity_id")
+        if any(entity_id in owners[c.doc_id][0] and not owners[c.doc_id][1]
+               for c in selected if c.doc_id in owners):
+            selected = [
+                c for c in selected
+                if c.doc_id not in owners or not owners[c.doc_id][0]
+                or owners[c.doc_id][1] or entity_id in owners[c.doc_id][0]
+            ]
         return selected
