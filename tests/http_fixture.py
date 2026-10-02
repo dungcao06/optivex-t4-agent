@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from contextlib import contextmanager
@@ -28,6 +29,10 @@ def prompt_reply(payload: dict, mode: str) -> str:
     messages = payload["messages"]
     system = next(message["content"] for message in messages if message["role"] == "system")
     user = next(message["content"] for message in reversed(messages) if message["role"] == "user")
+
+    if mode == "review_valid" and user.startswith("ROSTER REVIEW REQUEST."):
+        entity_id = re.search(r"^- ([^:]+): point_forecast=", user, re.M).group(1)
+        return json.dumps({"updates": [{"entity_id": entity_id, "point_forecast": 0.5}]})
 
     def reply_one(prompt: str) -> dict:
         reply = json.loads(_mock_reply(system, prompt))

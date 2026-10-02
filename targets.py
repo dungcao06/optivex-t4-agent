@@ -84,12 +84,22 @@ def target_contract(task, entity):
 def validate_target(raw, prediction, task, entity):
     contract = target_contract(task, entity)
     interval = prediction['interval']
+    projected = None
     if contract['output_unit'] == 'probability':
-        vals = [interval['lo'], interval['hi']]
-        if 'point_forecast' in prediction:
-            vals.append(prediction['point_forecast'])
-        if any(not 0 <= number(v) <= 1 for v in vals):
-            raise ValueError('Probability forecast and interval must lie within [0,1]')
+        lo, hi = number(interval['lo']), number(interval['hi'])
+        if 'point_forecast' in prediction and not 0 <= number(prediction['point_forecast']) <= 1:
+            raise ValueError('Probability forecast must lie within [0,1]')
+        if lo > hi or hi < 0 or lo > 1:
+            raise ValueError('Probability interval must intersect [0,1] and be ordered')
+        projected = (max(0.0, lo), min(1.0, hi))
+    # Check explicit arithmetic against the original reply before support repair.
+    _validate_record(raw, prediction, entity, contract)
+    if projected is not None:
+        interval['lo'], interval['hi'] = projected
+
+
+def _validate_record(raw, prediction, entity, contract):
+    interval = prediction['interval']
     record = raw.get('target_record')
     if record is None:
         return

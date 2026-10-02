@@ -4,6 +4,27 @@ This is Team `optivex`'s Agenthon 2026 Track 4 agent. It uses the official stron
 
 Exact quotation matching establishes provenance, not semantic entailment. If inference cannot recover for an entity, its row takes the median forecast of the unit's successful rows, cites only the entity's task row and is marked `notes.fallback_quality="unverified"`. That is not a competitive prediction. A missing eligible corpus cannot be repaired by inventing evidence.
 
+## Bounded roster review experiment
+
+After successful primary forecasts, this candidate allows one non-thinking review request
+for rosters of 2–20 entities when more than 60 seconds and one request remain. The review
+compares all forecasts using the task fields and exact own/shared evidence excerpts. It can
+change at most four entity forecasts: numeric points must stay inside their original
+intervals and labels must stay within the declared vocabulary. Intervals and factual claims
+are preserved. Any malformed or invalid update rejects the entire review; a timeout keeps
+the primary answers without retry. Reasons for changed forecasts are removed. The same
+25-request ceiling, 4,000-token output limit and request timeout apply.
+
+For explicit probability targets, an otherwise valid interval is intersected with [0,1].
+Nonfinite, reversed or wholly disjoint intervals and out-of-domain point forecasts still
+fail. Explicit arithmetic is checked before repair. This avoids discarding valid labels
+solely because an interval extends outside probability support; it does not impose a new
+class prior or force a central interval to contain a skewed mean.
+
+The hypothesis is that comparing related forecasts can improve ranking and consistency.
+Mock and HTTP tests establish admission, evidence and budget behavior only. A Development
+evaluation is required to measure forecasting performance against the observed 0.4067 base.
+
 ## Quantity-and-period prompt experiment
 
 This candidate adds an internal check for the requested quantity, units, denominator and

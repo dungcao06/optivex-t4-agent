@@ -231,3 +231,17 @@ def test_first_pass_reason_reaches_answer_without_extra_request(tmp_path, monkey
     assert_answer(answer, json.loads((EXAMPLE/'task.json').read_text()), EXAMPLE)
     from baselines.guardrails_example.citation_rail import check_submitted_reasons, load_corpus
     assert check_submitted_reasons(answer,load_corpus(EXAMPLE/'corpus'), '2024-03-15') == []
+
+
+def test_roster_review_applies_over_real_http(tmp_path):
+    unit = UPSTREAM / "units" / "t4-auction-btc-202411-us7"
+    task = json.loads((unit / "task.json").read_text())
+    answer, requests = run_agent(tmp_path, unit, mode="review_valid")
+    assert_answer(answer, task, unit)
+    assert_request_contract(requests)
+    assert len(requests) == len(task["entities"]) + 1
+    assert answer["notes"]["roster_review"] == "accepted"
+    assert answer["notes"]["degraded_entities"] == 0
+    assert answer["entity_predictions"][0]["point_forecast"] == .5
+    assert all(row["point_forecast"] == 0 for row in answer["entity_predictions"][1:])
+    assert requests[-1]["payload"]["messages"][0]["content"] != requests[0]["payload"]["messages"][0]["content"]
