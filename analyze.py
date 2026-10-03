@@ -39,14 +39,23 @@ without an underlying numeric quantity may omit point_forecast; never emit NaN o
 
 
 def optivex_prompt(task: dict, entity: dict, retrieved: list) -> str:
+    contract = target_contract(task, entity)
     base = upstream_prompt(task, entity, retrieved)
     base = base.replace('Set "rank" to this entity\'s predicted rank (1 = highest). ', '')
     base = base.replace('  "rank": "integer, ranking tasks only",\n', '')
     base += "\nFULL TARGET SPECIFICATION: " + json.dumps(task.get("target", {}), ensure_ascii=False)
-    base += "\nRESOLUTION DATE: " + str(task.get("resolution_date", ""))
+    if contract.get('forecast_period_source') == 'entity.resolving_release_date':
+        base += "\nTASK-WIDE RESOLUTION DATE: " + contract['task_resolution_date']
+        base += "\nREQUESTED ROW RELEASE DATE: " + contract['forecast_period']
+        if 'reference_period' in contract:
+            base += "\nREFERENCE PERIOD: " + contract['reference_period']
+        base += ("\nForecast this row's specified release; do not substitute the task-wide resolution date. "
+                 "The reference period names the observation being revised, not the release date.")
+    else:
+        base += "\nRESOLUTION DATE: " + str(task.get("resolution_date", ""))
     base += "\nTASK FAMILY: " + str(task.get("family", ""))
-    base += "\nTARGET CONTRACT: " + json.dumps(target_contract(task, entity), ensure_ascii=False)
-    return base + """
+    base += "\nTARGET CONTRACT: " + json.dumps(contract, ensure_ascii=False)
+    prompt = base + """
 
 OPTIVEX ADMISSION CHECK BEFORE OUTPUT:
 - Use no fact absent from ENTITY or EVIDENCE EXCERPTS.
@@ -85,6 +94,13 @@ answer_implication. Use EXACTLY "ENTITY_ID: label=LABEL" for classification or
 Do not claim the forecast has already happened. No task-table citation for
 reasons. Keep each text field under 400 characters. Reasons are optional: do not invent one.
 """
+
+
+    if contract.get('forecast_period_source') == 'entity.resolving_release_date':
+        prompt = prompt.replace(
+            'resolution date; the full task and entity fields specify the observation period and event window',
+            'requested row release date; reference_period names the observation being revised')
+    return prompt
 
 
 def main() -> int:

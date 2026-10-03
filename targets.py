@@ -6,6 +6,7 @@ with the published scaffold; an explicitly inconsistent record enters bounded re
 from __future__ import annotations
 import math
 import re
+from datetime import date
 
 
 def number(value):
@@ -43,6 +44,34 @@ def transform(value, operation, baseline=None, denominator=None):
     return number(result)
 
 
+def _iso_day(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _row_timing(task, entity):
+    """Bind only an explicit release field named in the task, never infer from an ID."""
+    if not re.search(r"(?<!\w)resolving_release_date(?!\w)", str(task.get('prompt', ''))):
+        return {}
+    requested = _iso_day(entity.get('resolving_release_date'))
+    cutoff = _iso_day(task.get('cutoff_date'))
+    resolution = _iso_day(task.get('resolution_date'))
+    if requested is None or cutoff is None or resolution is None or not cutoff < requested <= resolution:
+        return {}
+    result = {'forecast_period': requested.isoformat(),
+              'forecast_period_source': 'entity.resolving_release_date',
+              'task_resolution_date': resolution.isoformat()}
+    month = entity.get('ref_month')
+    if isinstance(month, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}", month):
+        if _iso_day(month + '-01') is not None:
+            result['reference_period'] = month
+    return result
+
+
 def target_contract(task, entity):
     target = task.get('target', {})
     prompt = str(task.get('prompt', ''))
@@ -78,7 +107,8 @@ def target_contract(task, entity):
                                         'denominator_field': denom})
     return {'allowed_conversions': conversions, 'target_name': target.get('name', ''), 'target_type': target.get('type', ''),
             'output_unit': unit, 'forecast_period': str(task.get('resolution_date', '')),
-            'cutoff_date': str(task.get('cutoff_date', '')), 'entity_fields': dict(entity)}
+            'cutoff_date': str(task.get('cutoff_date', '')), 'entity_fields': dict(entity),
+            **_row_timing(task, entity)}
 
 
 def validate_target(raw, prediction, task, entity):
