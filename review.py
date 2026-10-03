@@ -54,11 +54,23 @@ def _excerpt(text: str) -> str:
     return text[: cut if cut > 0 else EXCERPT_CHARS].strip()
 
 
-def _unit(task: dict, entity: dict) -> str:
+ROW_RELEASE = "entity.resolving_release_date"
+
+
+def _contract(task: dict, entity: dict) -> dict:
     try:
-        return str(target_contract(task, entity)["output_unit"])
+        return target_contract(task, entity)
     except Exception:  # noqa: BLE001 - a missing contract must not drop the review prompt.
-        return "task-defined"
+        return {}
+
+
+def _timing(contract: dict) -> str:
+    """The row's own requested release, only when the target contract bound it explicitly."""
+    if contract.get("forecast_period_source") != ROW_RELEASE:
+        return ""
+    reference = contract.get("reference_period")
+    return f" | requested_release={contract['forecast_period']}" + (
+        f" | reference_period={reference}" if reference else "")
 
 
 def build_review_prompt(task: dict, predictions: list[dict], contexts: list[list],
@@ -68,18 +80,24 @@ def build_review_prompt(task: dict, predictions: list[dict], contexts: list[list
         return None
     target = task.get("target") or {}
     classification = target.get("type") == "classification"
+    contracts = [_contract(task, entity) for entity in task["entities"]]
+    timings = [_timing(contract) for contract in contracts]
+    resolution = (f"TASK-WIDE RESOLUTION DATE: {task.get('resolution_date', '')} (each row's requested_release, "
+                  "where listed, is the release to forecast)" if any(timings)
+                  else f"RESOLUTION DATE: {task.get('resolution_date', '')}")
     head = [
         "ROSTER REVIEW REQUEST. All forecasts for this task are listed together below.",
         f"TASK: {task.get('prompt', '')}",
         "FULL TARGET SPECIFICATION: " + json.dumps(target, ensure_ascii=False),
-        f"CUTOFF DATE: {task.get('cutoff_date', '')}; RESOLUTION DATE: {task.get('resolution_date', '')}; "
+        f"CUTOFF DATE: {task.get('cutoff_date', '')}; {resolution}; "
         f"INTERVAL LEVEL: {task.get('interval_level', 0.9)}",
         "SUBMITTED FORECASTS (entity metadata complete; output_unit from the target contract):",
     ]
-    for entity, row in zip(task["entities"], predictions):
+    for entity, row, contract, timing in zip(task["entities"], predictions, contracts, timings):
         meta = json.dumps({k: v for k, v in entity.items() if k not in _SKIP_FIELDS}, ensure_ascii=False)
+        unit = str(contract["output_unit"]) if "output_unit" in contract else "task-defined"
         head.append(f"- {entity['entity_id']}: {_answer(row, classification)} | "
-                    f"output_unit={_unit(task, entity)} | {meta}")
+                    f"output_unit={unit}{timing} | {meta}")
     tail = [
         "",
         'Reply format for THIS request: {"updates": [...]}, not the prediction format.',

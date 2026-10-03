@@ -157,3 +157,34 @@ def test_cap_counts_every_character_and_refuses_an_oversized_head():
     contexts = [[Chunk("own_a", "2024-10-25", 0, len(long), long)]] * 3
     owners = {"own_a": (frozenset({"A", "B", "C"}), False)}
     assert len(build_review_prompt(REG, ROWS, contexts, owners)) <= MAX_REVIEW_PROMPT_CHARS
+
+
+MACRO = dict(REG, resolution_date="2024-11-27", cutoff_date="2024-09-30",
+             prompt="Predict whether the release identified by resolving_release_date revises UP or DOWN.",
+             target={"name": "revision_direction", "type": "classification", "labels": ["UP", "DOWN"]},
+             entities=[{"entity_id": "A", "ref_month": "2024-08", "resolving_release_date": "2024-10-04"},
+                       {"entity_id": "B", "ref_month": "2024-08", "resolving_release_date": "2024-11-01"},
+                       {"entity_id": "C", "ref_month": "2024-09", "resolving_release_date": "2024-11-27"}])
+MACRO_ROWS = [dict(r, label="UP") for r in ROWS]
+
+
+def test_row_release_dates_stay_distinct_in_the_review_prompt():
+    prompt = build_review_prompt(MACRO, MACRO_ROWS, CONTEXTS, OWNERS)
+    assert "TASK-WIDE RESOLUTION DATE: 2024-11-27" in prompt and "; RESOLUTION DATE:" not in prompt
+    assert "requested_release=2024-10-04 | reference_period=2024-08" in prompt
+    assert "requested_release=2024-11-01 | reference_period=2024-08" in prompt
+    assert "requested_release=2024-11-27 | reference_period=2024-09" in prompt
+    assert "each row's requested_release" in prompt and len(prompt) <= MAX_REVIEW_PROMPT_CHARS
+
+
+def test_entity_dates_the_task_does_not_name_are_not_promoted():
+    task = dict(MACRO, prompt="Predict whether the next estimate revises UP or DOWN.")
+    prompt = build_review_prompt(task, MACRO_ROWS, CONTEXTS, OWNERS)
+    assert "requested_release=" not in prompt and "TASK-WIDE" not in prompt
+    assert "; RESOLUTION DATE: 2024-11-27;" in prompt
+
+
+def test_tasks_without_row_releases_keep_the_original_header():
+    prompt = build_review_prompt(dict(REG, resolution_date="2024-11-26"), ROWS, CONTEXTS, OWNERS)
+    assert "; RESOLUTION DATE: 2024-11-26;" in prompt
+    assert "requested_release=" not in prompt and "TASK-WIDE" not in prompt
