@@ -55,6 +55,7 @@ def _excerpt(text: str) -> str:
 
 
 ROW_RELEASE = "entity.resolving_release_date"
+ROW_AUCTION = "entity.auction_date"
 
 
 def _contract(task: dict, entity: dict) -> dict:
@@ -66,6 +67,8 @@ def _contract(task: dict, entity: dict) -> dict:
 
 def _timing(contract: dict) -> str:
     """The row's own requested release, only when the target contract bound it explicitly."""
+    if contract.get("forecast_period_source") == ROW_AUCTION:
+        return f" | requested_auction={contract['forecast_period']}"
     if contract.get("forecast_period_source") != ROW_RELEASE:
         return ""
     reference = contract.get("reference_period")
@@ -85,6 +88,11 @@ def build_review_prompt(task: dict, predictions: list[dict], contexts: list[list
     resolution = (f"TASK-WIDE RESOLUTION DATE: {task.get('resolution_date', '')} (each row's requested_release, "
                   "where listed, is the release to forecast)" if any(timings)
                   else f"RESOLUTION DATE: {task.get('resolution_date', '')}")
+    if any(contract.get("forecast_period_source") == ROW_AUCTION for contract in contracts):
+        resolution = (f"TASK-WIDE RESOLUTION DATE: {task.get('resolution_date', '')} "
+                      "(each row's requested_auction or requested_release, where listed, "
+                      "is the event to forecast; later scheduled events may still affect pre-auction expectations "
+                      "but must not be treated as already observed outcomes)")
     head = [
         "ROSTER REVIEW REQUEST. All forecasts for this task are listed together below.",
         f"TASK: {task.get('prompt', '')}",

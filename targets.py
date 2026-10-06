@@ -72,6 +72,48 @@ def _row_timing(task, entity):
     return result
 
 
+
+def _auction_timing(task, entity):
+    """Bind an explicitly dated auction target, never a company's reporting schedule."""
+    prompt = str(task.get('prompt', '')).lower()
+    target = task.get('target')
+    if not isinstance(target, dict):
+        return {}
+    # Incidental auction evidence must not re-date a different prediction target.
+    name = re.sub(r'[^a-z0-9]', '', str(target.get('name', '')).lower())
+    if name != 'bidtocoverratio':
+        return {}
+    if not (re.search(r'\bauctions?\b', prompt) and
+            re.search(r'\bbid[- ]to[- ]cover\b', prompt)):
+        return {}
+    # Bind only an explicit per-auction request, not an aggregate over a tenor/window.
+    if not re.search(r'\b(?:for|of)\s+(?:each|every)\s+(?:(?!(?:tenor|issuer|using|based|through|until|after|before|across)\b)[a-z0-9.-]+\s+){0,8}auction\b', prompt):
+        return {}
+    if re.search(r'\b(?:average|aggregate|averaged|resolution_date)\b|\bacross\s+(?:all|multiple)\b', prompt):
+        return {}
+    requested = _iso_day(entity.get('auction_date'))
+    cutoff = _iso_day(task.get('cutoff_date'))
+    resolution = _iso_day(task.get('resolution_date'))
+    if requested is None or cutoff is None or resolution is None or not cutoff < requested <= resolution:
+        return {}
+    # An additional event date can mean settlement or another horizon. Do not guess.
+    for key, value in entity.items():
+        if key != 'auction_date':
+            other = _iso_day(value)
+            if other is not None and cutoff < other <= resolution:
+                return {}
+    roster = task.get('entities')
+    if not isinstance(roster, list):
+        return {}
+    dates = {_iso_day(row.get('auction_date')) for row in roster if isinstance(row, dict)}
+    dates = {day for day in dates if day is not None and cutoff < day <= resolution}
+    if requested not in dates or len(dates) < 2:
+        return {}
+    return {'forecast_period': requested.isoformat(),
+            'forecast_period_source': 'entity.auction_date',
+            'task_resolution_date': resolution.isoformat()}
+
+
 def target_contract(task, entity):
     target = task.get('target', {})
     prompt = str(task.get('prompt', ''))
@@ -108,7 +150,7 @@ def target_contract(task, entity):
     return {'allowed_conversions': conversions, 'target_name': target.get('name', ''), 'target_type': target.get('type', ''),
             'output_unit': unit, 'forecast_period': str(task.get('resolution_date', '')),
             'cutoff_date': str(task.get('cutoff_date', '')), 'entity_fields': dict(entity),
-            **_row_timing(task, entity)}
+            **_auction_timing(task, entity), **_row_timing(task, entity)}
 
 
 def validate_target(raw, prediction, task, entity):

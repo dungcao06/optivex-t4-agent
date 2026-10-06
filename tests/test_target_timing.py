@@ -58,7 +58,7 @@ def test_public_macro_distinct_releases_for_same_reference_month():
 def test_other_public_families_keep_resolution_date():
     for path in UNITS.glob('*/task.json'):
         t=json.loads(path.read_text())
-        if 'macrorev' in path.parent.name: continue
+        if 'macrorev' in path.parent.name or 'auction-btc' in path.parent.name: continue
         for e in t['entities']:
             assert target_contract(t,e)['forecast_period']==t['resolution_date']
 
@@ -70,3 +70,36 @@ def test_prompt_separates_reference_release_and_global_resolution():
     assert 'REQUESTED ROW RELEASE DATE: 2024-10-04' in text
     assert 'REFERENCE PERIOD: 2024-08' in text
     assert 'do not substitute the task-wide resolution date' in text
+
+
+def test_row_release_rewrites_target_record_instruction():
+    import analyze
+    text = analyze.optivex_prompt(task(), {'resolving_release_date': '2024-10-04'}, [])
+    assert 'requested row release date; reference_period names' in text
+    assert 'resolution date; the full task and entity fields specify' not in text
+
+
+@pytest.mark.parametrize('key,value', [
+    ('cutoff_date', None), ('cutoff_date', '2024-09-31'),
+    ('resolution_date', '2024-11-31'), ('resolution_date', '20241127'),
+])
+def test_invalid_task_dates_do_not_bind_release(key, value):
+    t = task()
+    t[key] = value
+    contract = target_contract(t, {'resolving_release_date': '2024-10-04'})
+    assert 'forecast_period_source' not in contract
+    assert contract['forecast_period'] == str(t.get('resolution_date', ''))
+
+
+@pytest.mark.parametrize('reference', [None, '', '2024-13', '2024-2', '202402', 202408])
+def test_invalid_reference_month_does_not_invent_observation_period(reference):
+    contract = target_contract(task(), {'resolving_release_date': '2024-10-04',
+                                        'ref_month': reference})
+    assert contract['forecast_period'] == '2024-10-04'
+    assert 'reference_period' not in contract
+
+
+def test_release_on_task_resolution_is_valid():
+    contract = target_contract(task(), {'resolving_release_date': '2024-11-27'})
+    assert contract['forecast_period_source'] == 'entity.resolving_release_date'
+    assert contract['forecast_period'] == '2024-11-27'

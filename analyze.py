@@ -51,6 +51,13 @@ def optivex_prompt(task: dict, entity: dict, retrieved: list) -> str:
             base += "\nREFERENCE PERIOD: " + contract['reference_period']
         base += ("\nForecast this row's specified release; do not substitute the task-wide resolution date. "
                  "The reference period names the observation being revised, not the release date.")
+    elif contract.get('forecast_period_source') == 'entity.auction_date':
+        base += "\nTASK-WIDE RESOLUTION DATE: " + contract['task_resolution_date']
+        base += "\nREQUESTED AUCTION DATE: " + contract['forecast_period']
+        base += ("\nForecast this row's auction; do not substitute the task-wide resolution date. "
+                 "Scheduled events after this auction are outside its forecast window but "
+                 "may still affect pre-auction expectations; treat them as anticipated risks, "
+                 "not as already observed outcomes.")
     else:
         base += "\nRESOLUTION DATE: " + str(task.get("resolution_date", ""))
     base += "\nTASK FAMILY: " + str(task.get("family", ""))
@@ -100,6 +107,10 @@ reasons. Keep each text field under 400 characters. Reasons are optional: do not
         prompt = prompt.replace(
             'resolution date; the full task and entity fields specify the observation period and event window',
             'requested row release date; reference_period names the observation being revised')
+    elif contract.get('forecast_period_source') == 'entity.auction_date':
+        prompt = prompt.replace(
+            'resolution date; the full task and entity fields specify the observation period and event window',
+            'requested auction date; the task-wide resolution date is only the outer task boundary')
     return prompt
 
 

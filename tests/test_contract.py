@@ -39,3 +39,25 @@ def test_runtime_omits_optional_label_and_rank() -> None:
             {"target": {"type": family}, "entities": [{"entity_id": "one"}]}, {"entity_id": "one"}, [chunk])
         assert "label" not in result
         assert "rank" not in result
+
+
+def test_image_copies_every_local_module_the_entrypoint_imports() -> None:
+    """Local tests import from the source tree; the image has only what the Dockerfile copies."""
+    import ast
+    import re
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    copied = {name for line in dockerfile.splitlines() if line.startswith("COPY ") and "--from=" not in line
+              for name in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\.py\b", line)}
+    local = {path.stem for path in ROOT.glob("*.py")}
+    needed, queue = set(), ["analyze"]
+    while queue:
+        module = queue.pop()
+        if module in needed:
+            continue
+        needed.add(module)
+        for node in ast.walk(ast.parse((ROOT / f"{module}.py").read_text(encoding="utf-8"))):
+            names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                     else [node.module] if isinstance(node, ast.ImportFrom) and node.module and not node.level else [])
+            queue += [name.split(".")[0] for name in names if name.split(".")[0] in local]
+    assert needed - copied == set(), f"imported but not copied into the image: {sorted(needed - copied)}"
