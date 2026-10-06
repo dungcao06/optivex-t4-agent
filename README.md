@@ -179,3 +179,10 @@ intervals, reasons, call budget and output schema. Prompt changes can still help
 forecasts. Local coverage is 46/78 public entities; arithmetic/provenance and HTTP tests do
 not measure House-model accuracy. The 42-fold auction replay is a local cross-check against
 an adjacent research artifact and is skipped in CI when that artifact is absent.
+
+Binary event probabilities: when the task explicitly assigns `point_forecast` to
+one named binary class's probability on `(0 to 1)`, the output label follows the
+more probable class. Ties, conditional or ambiguous definitions, and numeric means
+are left unchanged. A point-only roster correction also updates that label;
+explicitly contradictory review updates are rejected atomically. This consistency
+check does not establish calibration or an improvement in competition accuracy.

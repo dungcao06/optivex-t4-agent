@@ -81,6 +81,53 @@ def target_contract(task, entity):
             'cutoff_date': str(task.get('cutoff_date', '')), 'entity_fields': dict(entity)}
 
 
+
+def probability_class(task, point):
+    """Most probable class only for an explicit binary event-probability definition.
+
+    This deliberately recognizes a narrow assignment grammar, not arbitrary prose,
+    task IDs, label order, or the sign of a numeric mean. Ambiguity and ties abstain.
+    """
+    target = task.get('target', {})
+    labels = target.get('labels')
+    if (target.get('type') != 'classification' or not isinstance(labels, list)
+            or len(labels) != 2 or not all(isinstance(x, str) for x in labels)
+            or len(set(labels)) != 2 or point is None):
+        return None
+    prompt = str(task.get('prompt', ''))
+    # Refuse prose with multiple assignments, even if only one is recognizable.
+    assignments = list(re.finditer(r'\bpoint[_ ]forecast\s*(?:=|as\b|is\b|:)', prompt, re.I))
+    if len(assignments) != 1:
+        return None
+    assignment = assignments[0]
+    start = max(prompt.rfind(c, 0, assignment.start()) for c in '.!?\n') + 1
+    tail = prompt[assignment.end():]
+    end = re.search(r'[.!?\n]', tail)
+    clause = prompt[start:assignment.end()] + (tail[:end.start()] if end else tail)
+    prefix = prompt[start:assignment.start()]
+    if (not re.search(r'\b(?:give|report|return|set|use)\b', prefix, re.I)
+            or re.search(r"\b(?:not|never|if|unless|given|conditional|conditioned|assuming|"
+                         r"provided|whichever|otherwise|instead|either|or)\b|don['’]t",
+                         clause, re.I)):
+        return None
+    named = []
+    for label in labels:
+        if not re.fullmatch(r'[A-Za-z]+(?:[_ -][A-Za-z]+)*', label):
+            return None
+        words = re.split(r'[_ -]', label)
+        pattern = (r'\s*(?:your\s+)?(?:predicted\s+)?probability\s+of\s+'
+                   r'(?:(?:a|an|the)\s+)?' + r'[_ -]'.join(map(re.escape, words))
+                   + r'\s*\(0\s+to\s+1\)\s*(?=[.,;]|$)')
+        if re.match(pattern, tail, re.I):
+            named.append(label)
+    if len(named) != 1:
+        return None
+    value = number(point)
+    if not 0 <= value <= 1 or value == .5:
+        return None
+    return named[0] if value > .5 else next(x for x in labels if x != named[0])
+
+
 def validate_target(raw, prediction, task, entity):
     contract = target_contract(task, entity)
     interval = prediction['interval']
@@ -96,6 +143,10 @@ def validate_target(raw, prediction, task, entity):
     _validate_record(raw, prediction, entity, contract)
     if projected is not None:
         interval['lo'], interval['hi'] = projected
+    if contract['output_unit'] == 'probability':
+        label = probability_class(task, prediction.get('point_forecast'))
+        if label is not None:
+            prediction['label'] = label
 
 
 def _validate_record(raw, prediction, entity, contract):

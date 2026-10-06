@@ -15,7 +15,7 @@ import json
 import math
 
 from claims import Ownership, may_cite
-from targets import target_contract
+from targets import target_contract, probability_class
 
 MAX_REVIEW_PROMPT_CHARS = 20_000
 MAX_ROSTER = 20
@@ -169,4 +169,10 @@ def _apply(raw, task, predictions):
                     and not 0 <= point <= 1):
                 return None
             row["point_forecast"] = point
+        if target_contract(task, by_id[entity_id])["output_unit"] == "probability":
+            coherent_label = probability_class(task, row.get("point_forecast"))
+            if coherent_label is not None:
+                if "label" in item and item["label"] != coherent_label:
+                    return None  # An explicit contradictory update is not trusted.
+                row["label"] = coherent_label
     return result
