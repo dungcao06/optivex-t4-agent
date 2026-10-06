@@ -44,7 +44,33 @@ def test_classification_can_omit_an_undefined_numeric_forecast():
     from baselines.strong_rag_baseline.indexer import Chunk
     raw = {"label": "beat", "point_forecast": None, "interval": {"lo": 1, "hi": 2},
            "evidence": [{"doc_id": "doc", "quote": "Evidence", "claim": "Context"}]}
-    result = normalize_prediction(raw, {"target": {"type": "classification", "labels": ["beat"]}},
+    result = normalize_prediction(raw, {"target": {"type": "classification", "labels": ["beat"]},
+                                   "entities": [{"entity_id": "one"}]},
                                   {"entity_id": "one"}, [Chunk("doc", "2024-01-01", 0, 8, "Evidence")])
     assert result["label"] == "beat"
     assert "point_forecast" not in result
+
+
+TASK_90 = {"target": {"type": "regression"}, "interval_level": 0.9, "entities": [{"entity_id": "one"}]}
+
+
+def _raw(level):
+    interval = {"lo": 1, "hi": 3}
+    if level is not None:
+        interval["level"] = level
+    return {"point_forecast": 2, "interval": interval, "evidence": []}
+
+
+@pytest.mark.parametrize("level", [None, 0.9, 90])
+def test_matching_or_absent_interval_level_is_accepted(level):
+    from runtime import normalize_prediction
+    result = normalize_prediction(_raw(level), TASK_90, {"entity_id": "one"}, [])
+    assert result["interval"] == {"level": 0.9, "lo": 1.0, "hi": 3.0}
+
+
+@pytest.mark.parametrize("level", [0.5, 50, 0.95, "0.5", True])
+def test_a_different_interval_level_is_not_relabeled(level):
+    """A 50% band relabeled as the task's 90% band would be scored as a too-narrow interval."""
+    from runtime import normalize_prediction
+    with pytest.raises(ValueError):
+        normalize_prediction(_raw(level), TASK_90, {"entity_id": "one"}, [])
