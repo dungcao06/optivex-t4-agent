@@ -46,7 +46,10 @@ def prompt_reply(payload: dict, mode: str) -> str:
             reply["point_forecast"] = float("nan")
             reply["interval"] = {"level": 0.9, "lo": -float("inf"), "hi": float("inf")}
         elif mode == "interval_list":
-            reply["interval"] = [-1, 1]
+            reply["interval"] = [-1]
+        elif mode == "interval_pair":
+            band = reply["interval"]
+            reply["interval"] = [band["lo"], band["hi"]]
         elif mode == "doc_id_list":
             for evidence in reply["evidence"]:
                 evidence["doc_id"] = [evidence["doc_id"]]

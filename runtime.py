@@ -20,7 +20,7 @@ from baselines.strong_rag_baseline.cli import _mock_reply
 from claims import Ownership, build_claims, citable_note, load_ownership, task_row_claim
 from reasons import build_reasons
 from review import build_review_prompt, apply_review
-from targets import validate_target
+from targets import target_contract, validate_target
 from fallback import fallback_prediction
 from retrieval import EvidenceIndex, build_index
 from history import build_history, format_history
@@ -61,6 +61,37 @@ def parse_model_json(raw: str) -> dict:
     return value
 
 
+_GROUPED = re.compile(r"[+-]?[1-9]\d{0,2}(?:(?:,\d{3}){2,}(?:\.\d+)?|,\d{3}\.\d+)")
+
+
+def _number(value, percent_ok: bool = False) -> float:
+    """A finite number; a string may carry thousands separators, and a trailing % only for percent units."""
+    if isinstance(value, str):
+        text = value.strip()
+        if percent_ok and text.endswith("%"):
+            text = text[:-1].strip()
+        value = text.replace(",", "") if _GROUPED.fullmatch(text) else text
+    return finite_number(value)
+
+
+def _label(value, labels: list) -> str:
+    """The allowed label, matched exactly or by the one case-insensitive, whitespace-trimmed match."""
+    if isinstance(value, str):
+        if value in labels:
+            return value
+        matches = [label for label in labels if label.casefold() == value.strip().casefold()]
+        if len(matches) == 1:
+            return matches[0]
+    raise ValueError("Label is not in the allowed vocabulary")
+
+
+def _level(value) -> float:
+    if isinstance(value, str) and value.strip().endswith("%"):
+        return finite_number(value.strip()[:-1].strip()) / 100
+    returned = finite_number(value)
+    return returned / 100 if returned > 1 else returned
+
+
 def finite_number(value) -> float:
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError("Expected a finite number")
@@ -76,24 +107,26 @@ def normalize_prediction(raw: dict, task: dict, entity: dict, chunks: list, *,
     if not isinstance(raw, dict):
         raise ValueError("Prediction must be an object")
     prediction = {"entity_id": entity["entity_id"]}
+    try:
+        percent_ok = target_contract(task, entity).get("output_unit") == "percent"
+    except Exception:  # noqa: BLE001 - without a contract, no percent sign is accepted.
+        percent_ok = False
     if task["target"]["type"] == "classification":
-        label = raw.get("label")
-        if not isinstance(label, str) or label not in task["target"]["labels"]:
-            raise ValueError("Label is not in the allowed vocabulary")
-        prediction["label"] = label
+        prediction["label"] = _label(raw.get("label"), task["target"]["labels"])
     if task["target"]["type"] != "classification" or raw.get("point_forecast") is not None:
-        prediction["point_forecast"] = finite_number(raw.get("point_forecast"))
+        prediction["point_forecast"] = _number(raw.get("point_forecast"), percent_ok)
     interval = raw.get("interval")
+    if isinstance(interval, list) and len(interval) == 2:
+        interval = {"lo": interval[0], "hi": interval[1]}
     if not isinstance(interval, dict):
         raise ValueError("Interval must be an object")
-    lo, hi = finite_number(interval.get("lo")), finite_number(interval.get("hi"))
-    if lo > hi:
-        raise ValueError("Interval bounds are reversed")
+    lo, hi = _number(interval.get("lo"), percent_ok), _number(interval.get("hi"), percent_ok)
+    lo, hi = min(lo, hi), max(lo, hi)  # The same band written high-to-low.
     level = task.get("interval_level", 0.9)
     if interval.get("level") is not None:
-        returned = finite_number(interval["level"])
+        returned = _level(interval["level"])
         # A band at another level would be scored as the task's level; repair, never relabel.
-        if not math.isclose(returned / 100 if returned > 1 else returned, level, abs_tol=1e-6):
+        if not math.isclose(returned, level, abs_tol=1e-6):
             raise ValueError("Interval level differs from the task's declared level")
     prediction["interval"] = {"level": level, "lo": lo, "hi": hi}
     validate_target(raw, prediction, task, entity)

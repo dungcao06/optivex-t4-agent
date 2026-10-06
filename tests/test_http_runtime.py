@@ -245,3 +245,17 @@ def test_roster_review_applies_over_real_http(tmp_path):
     assert answer["entity_predictions"][0]["point_forecast"] == .5
     assert all(row["point_forecast"] == 0 for row in answer["entity_predictions"][1:])
     assert requests[-1]["payload"]["messages"][0]["content"] != requests[0]["payload"]["messages"][0]["content"]
+
+
+def test_interval_pair_over_http_preserves_answer_without_retry(tmp_path):
+    base_dir = tmp_path / 'base'
+    pair_dir = tmp_path / 'pair'
+    base_dir.mkdir()
+    pair_dir.mkdir()
+    base, base_requests = run_agent(base_dir, EXAMPLE, 'valid')
+    repaired, repaired_requests = run_agent(pair_dir, EXAMPLE, 'interval_pair')
+    assert repaired['entity_predictions'] == base['entity_predictions']
+    assert repaired['notes']['degraded_entities'] == 0
+    assert len(repaired_requests) == len(base_requests) == 1
+    assert_request_contract(repaired_requests)
+    assert_answer(repaired, json.loads((EXAMPLE / 'task.json').read_text()), EXAMPLE)
