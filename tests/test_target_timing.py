@@ -1,13 +1,14 @@
 """Task-wide resolution must not replace an explicitly requested row release."""
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 import pytest
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from targets import target_contract, validate_target
-UNITS=ROOT.parent/'track4-analysis-public-ede7381/units'
+UNITS=Path(os.environ.get('T4_UPSTREAM_PATH', ROOT.parent/'track4-analysis-public-ede7381'))/'units'
 
 def task():
     return {'prompt':'Predict next estimate in the release identified by resolving_release_date.',

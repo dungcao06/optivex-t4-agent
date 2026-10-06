@@ -1,6 +1,7 @@
 """Independent auction timing acceptance tests; no observed outcomes or unit-ID dispatch."""
 import copy
 import json
+import os
 from pathlib import Path
 import pytest
 from targets import target_contract, validate_target
@@ -27,7 +28,8 @@ def test_independent_synthetic_auction_uses_its_event_date():
 
 
 def test_independent_public_auction_contract_and_ledger():
-    path = Path(__file__).resolve().parents[2] / 'track4-analysis-public-ede7381/units/t4-auction-btc-202411-us7/task.json'
+    upstream = Path(os.environ.get('T4_UPSTREAM_PATH', Path(__file__).resolve().parents[2] / 'track4-analysis-public-ede7381'))
+    path = upstream / 'units/t4-auction-btc-202411-us7/task.json'
     task = json.loads(path.read_text())
     for entity in task['entities']:
         c = target_contract(task, entity)
